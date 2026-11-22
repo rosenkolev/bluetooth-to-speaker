@@ -20,7 +20,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 rumqttc = { version = "0.24", default-features = false }
-symphonia = { version = "0.5", default-features = false, features = ["mp3", "aac", "isomp4", "flac", "wav", "pcm", "ogg", "vorbis"] }
+symphonia = { version = "0.6", default-features = false, features = ["mp3", "aac", "isomp4", "flac", "wav", "pcm", "ogg", "vorbis"] }
 ureq = { version = "2", default-features = false, features = ["tls"] }
 socket2 = { version = "0.5", features = ["all"] }
 log = "0.4"
