@@ -193,6 +193,8 @@ struct Session<'a> {
     /// Connected device addresses, oldest first.
     connected: Vec<String>,
     switched_away: HashMap<String, std::time::Instant>,
+    /// Addresses of paired devices.
+    known: std::collections::HashSet<String>,
 }
 
 async fn session(app: &Arc<App>, rx: &mut mpsc::UnboundedReceiver<BtCmd>, first: bool) -> zbus::Result<()> {
@@ -266,6 +268,7 @@ async fn session(app: &Arc<App>, rx: &mut mpsc::UnboundedReceiver<BtCmd>, first:
         pairing_was_open: false,
         connected: Vec::new(),
         switched_away: HashMap::new(),
+        known: Default::default(),
     };
     sess.refresh_devices().await;
     sess.connected =
@@ -287,16 +290,21 @@ async fn session(app: &Arc<App>, rx: &mut mpsc::UnboundedReceiver<BtCmd>, first:
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {
-            Some(msg) = bluez_signals.next() => {
-                if let Ok(msg) = msg { sess.on_signal(&msg).await; }
-            }
-            Some(msg) = owner_signals.next() => {
-                if let Ok(msg) = msg {
+            msg = bluez_signals.next() => match msg {
+                Some(Ok(msg)) => sess.on_signal(&msg).await,
+                Some(Err(_)) => {}
+                // The D-Bus connection is gone: start a new session.
+                None => return Err(zbus::Error::Failure("D-Bus connection closed".into())),
+            },
+            msg = owner_signals.next() => match msg {
+                Some(Ok(msg)) => {
                     if let Ok((_, _, new)) = msg.body().deserialize::<(String, String, String)>() {
                         if new.is_empty() { return Ok(()); }
                     }
                 }
-            }
+                Some(Err(_)) => {}
+                None => return Err(zbus::Error::Failure("D-Bus connection closed".into())),
+            },
             Some(ev) = ep_rx.recv() => sess.on_endpoint(ev).await,
             Some(cmd) = rx.recv() => sess.on_cmd(cmd).await,
             _ = tick.tick() => sess.on_tick().await,
@@ -325,7 +333,18 @@ impl Session<'_> {
             })
             .collect();
         devices.sort_by(|a, b| b.connected.cmp(&a.connected).then(a.name.cmp(&b.name)));
+        self.known = devices.iter().map(|d| d.address.clone()).collect();
         self.app.update_status(|s| s.devices = devices);
+    }
+
+    /// Signals about a device that is not ours (BLE sensors seen by Home Assistant's scanner
+    /// change RSSI many times a second) are skipped before their body is decoded.
+    fn is_ours(&self, path: &str) -> bool {
+        if !path.contains("/dev_") {
+            return true; // adapter, BlueZ root
+        }
+        let addr = addr_of(path);
+        self.app.pairing_open() || self.known.contains(&addr) || self.transports.values().any(|t| t.device == path)
     }
 
     async fn on_signal(&mut self, msg: &Message) {
@@ -333,6 +352,7 @@ impl Session<'_> {
         let (Some(member), Some(path)) = (hdr.member(), hdr.path()) else { return };
         let path = path.as_str().to_string();
         match member.as_str() {
+            "PropertiesChanged" if !self.is_ours(&path) => {}
             "PropertiesChanged" => {
                 let Ok((iface, changed, _)) =
                     msg.body().deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
@@ -345,7 +365,7 @@ impl Session<'_> {
                             self.on_transport_state(&path, &state).await;
                         }
                         if let Some(v) = changed.get("Volume").and_then(v_u16) {
-                            self.app.set_volume(((v as u32 * 100 + 63) / 127) as u8, true);
+                            self.app.set_volume(crate::app::from_avrcp(v), true);
                         }
                     }
                     IF_DEVICE => {
@@ -397,7 +417,21 @@ impl Session<'_> {
                     _ => {}
                 }
             }
-            "InterfacesAdded" | "InterfacesRemoved" => self.refresh_devices().await,
+            // Only paired devices matter; BLE devices come and go all the time.
+            "InterfacesAdded" => {
+                type Added = (OwnedObjectPath, HashMap<String, HashMap<String, OwnedValue>>);
+                let Ok((obj, ifaces)) = msg.body().deserialize::<Added>() else { return };
+                let paired = ifaces.get(IF_DEVICE).and_then(|d| d.get("Paired")).and_then(v_bool).unwrap_or(false);
+                if paired || self.known.contains(&addr_of(obj.as_str())) {
+                    self.refresh_devices().await;
+                }
+            }
+            "InterfacesRemoved" => {
+                let Ok((obj, _)) = msg.body().deserialize::<(OwnedObjectPath, Vec<String>)>() else { return };
+                if self.known.contains(&addr_of(obj.as_str())) {
+                    self.refresh_devices().await;
+                }
+            }
             _ => {}
         }
     }
@@ -414,7 +448,7 @@ impl Session<'_> {
                     }
                 }
                 // Tell the phone our volume.
-                let vol = (self.app.volume() as u32 * 127 / 100) as u16;
+                let vol = crate::app::to_avrcp(self.app.volume());
                 let _ = set_prop(&self.conn, &transport, IF_TRANSPORT, "Volume", Value::U16(vol)).await;
             }
             EpEvent::ClearConfiguration { transport } => {
@@ -542,7 +576,7 @@ impl Session<'_> {
             BtCmd::OpenPairing => self.open_pairing().await,
             BtCmd::ClosePairing => self.close_pairing().await,
             BtCmd::VolumeChanged(v) => {
-                let vol = (v as u32 * 127 / 100) as u16;
+                let vol = crate::app::to_avrcp(v);
                 for path in self.transports.keys() {
                     let _ = set_prop(&self.conn, path, IF_TRANSPORT, "Volume", Value::U16(vol)).await;
                 }
@@ -689,28 +723,34 @@ pub fn raise_priority() {
 
 // ---------------------------------------------------------------- D-Bus helpers
 
+/// BlueZ can stall (adapter reset, heavy scanning). No call may block the session for long.
+const DBUS_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn with_timeout<T>(f: impl std::future::Future<Output = zbus::Result<T>>) -> zbus::Result<T> {
+    tokio::time::timeout(DBUS_TIMEOUT, f)
+        .await
+        .unwrap_or_else(|_| Err(zbus::Error::Failure("BlueZ did not answer in time".into())))
+}
+
 async fn call<B>(conn: &Connection, path: &str, iface: &str, method: &str, body: &B) -> zbus::Result<Message>
 where
     B: serde::Serialize + zbus::zvariant::DynamicType,
 {
-    conn.call_method(Some(BLUEZ), path, Some(iface), method, body).await
+    with_timeout(conn.call_method(Some(BLUEZ), path, Some(iface), method, body)).await
 }
 
 async fn get_prop(conn: &Connection, path: &str, iface: &str, name: &str) -> zbus::Result<OwnedValue> {
-    let reply =
-        conn.call_method(Some(BLUEZ), path, Some("org.freedesktop.DBus.Properties"), "Get", &(iface, name)).await?;
+    let reply = call(conn, path, "org.freedesktop.DBus.Properties", "Get", &(iface, name)).await?;
     reply.body().deserialize::<OwnedValue>()
 }
 
 async fn set_prop(conn: &Connection, path: &str, iface: &str, name: &str, value: Value<'_>) -> zbus::Result<()> {
-    conn.call_method(Some(BLUEZ), path, Some("org.freedesktop.DBus.Properties"), "Set", &(iface, name, value)).await?;
+    call(conn, path, "org.freedesktop.DBus.Properties", "Set", &(iface, name, value)).await?;
     Ok(())
 }
 
 async fn managed_objects(conn: &Connection) -> zbus::Result<ManagedObjects> {
-    let reply = conn
-        .call_method(Some(BLUEZ), "/", Some("org.freedesktop.DBus.ObjectManager"), "GetManagedObjects", &())
-        .await?;
+    let reply = call(conn, "/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects", &()).await?;
     reply.body().deserialize::<ManagedObjects>()
 }
 

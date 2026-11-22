@@ -5,7 +5,7 @@ use crate::group::OutputGroup;
 use crate::sbc;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 struct Owner {
@@ -16,12 +16,13 @@ struct Owner {
     stop: Arc<AtomicBool>,
 }
 
+/// Who owns the outputs. A new source stops the old one; the old source's output writers
+/// see its stop flag and free the sound cards, and the new writers retry opening them
+/// for a moment. No lock is held while playing, so a stuck source cannot block the next.
 #[derive(Default)]
 pub struct OutputArbiter {
     owner: Mutex<Option<Owner>>,
     next_id: AtomicU64,
-    /// Held by the thread that has the ALSA device open.
-    device: Mutex<()>,
 }
 
 pub struct Lease {
@@ -72,16 +73,10 @@ impl OutputArbiter {
             o.stop.store(true, Ordering::Relaxed);
         }
     }
-
-    /// Wait until the previous owner closed the ALSA device.
-    fn lock_device(&self) -> MutexGuard<'_, ()> {
-        self.device.lock().unwrap_or_else(|e| e.into_inner())
-    }
 }
 
 /// Bluetooth A2DP stream: RTP/SBC packets from the transport fd to ALSA.
 pub fn run_bt_stream(app: Arc<App>, fd: OwnedFd, read_mtu: usize, lease: Lease) {
-    let _dev = app.output.lock_device();
     app.playback_starting();
     let mut dec = sbc::Decoder::new();
     let mut out: Option<OutputGroup> = None;
@@ -159,7 +154,7 @@ pub fn run_bt_stream(app: Arc<App>, fd: OwnedFd, read_mtu: usize, lease: Lease) 
             app.update_status(|s| {
                 s.stream = Some(Stream { codec: "SBC".into(), sample_rate: rate, channels: ch, bitpool })
             });
-            out = Some(OutputGroup::open(&app, &cfg.outputs, rate, ch, cfg.latency_ms));
+            out = Some(OutputGroup::open(&app, &cfg.outputs, rate, ch, cfg.latency_ms, &lease.stop));
             out_gen = gen;
         }
         if let Some(o) = &out {
@@ -236,15 +231,13 @@ pub struct NetState {
 
 /// Network playback (DLNA / Home Assistant / Music Assistant): HTTP URL → decode → ALSA.
 pub fn run_network(app: Arc<App>, uri: String, net: Arc<NetState>, lease: Lease) {
-    let dev = app.output.lock_device();
     app.playback_starting();
     net.playing.store(true, Ordering::Relaxed);
     net.position_ms.store(0, Ordering::Relaxed);
     net.duration_ms.store(0, Ordering::Relaxed);
     if let Err(e) = play_url(&app, &uri, &net, &lease) {
-        log::warn!("network playback of {uri} failed: {e}");
+        log::warn!("network playback failed: {e}");
     }
-    drop(dev); // free the ALSA device before the resume delay below
     app.output.release(&lease);
     app.playback_stopped();
     if app.output.current() == Source::Network {
@@ -331,6 +324,7 @@ fn play_url(app: &Arc<App>, uri: &str, net: &NetState, lease: &Lease) -> Result<
     let mut out: Option<OutputGroup> = None;
     let mut out_gen = 0u64;
     let mut sbuf: Option<SampleBuffer<i16>> = None;
+    let mut sbuf_spec = None;
     let mut frames_played: u64 = 0;
     loop {
         if lease.stopped() {
@@ -359,8 +353,13 @@ fn play_url(app: &Arc<App>, uri: &str, net: &NetState, lease: &Lease) -> Result<
         };
         let spec = *decoded.spec();
         let ch = spec.channels.count() as u32;
-        if sbuf.as_ref().map(|b| b.capacity() < decoded.capacity() * ch as usize).unwrap_or(true) {
+        if ch == 0 || spec.rate == 0 {
+            continue;
+        }
+        // New buffer when the packet is bigger or the format changed (a mismatch panics).
+        if sbuf_spec != Some(spec) || sbuf.as_ref().is_none_or(|b| b.capacity() < decoded.capacity() * ch as usize) {
             sbuf = Some(SampleBuffer::new(decoded.capacity() as u64, spec));
+            sbuf_spec = Some(spec);
         }
         let buf = sbuf.as_mut().unwrap();
         buf.copy_interleaved_ref(decoded);
@@ -374,7 +373,7 @@ fn play_url(app: &Arc<App>, uri: &str, net: &NetState, lease: &Lease) -> Result<
             app.update_status(|s| {
                 s.stream = Some(Stream { codec: codec_name.clone(), sample_rate: spec.rate, channels: ch, bitpool: 0 })
             });
-            out = Some(OutputGroup::open(app, &cfg.outputs, spec.rate, ch, cfg.latency_ms));
+            out = Some(OutputGroup::open(app, &cfg.outputs, spec.rate, ch, cfg.latency_ms, &lease.stop));
             out_gen = gen;
         }
         let o = out.as_ref().unwrap();

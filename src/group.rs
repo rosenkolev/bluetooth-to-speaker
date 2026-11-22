@@ -23,6 +23,15 @@ struct Ring {
     abort: AtomicBool,
     /// Writer is not playing (device missing); producer must not wait for it.
     dead: AtomicBool,
+    /// The source's stop flag. Writers watch it directly, so they free the sound card at
+    /// once even when the source thread is stuck (for example in a stalled HTTP read).
+    source_stop: Arc<AtomicBool>,
+}
+
+impl Ring {
+    fn aborted(&self) -> bool {
+        self.abort.load(Ordering::Relaxed) || self.source_stop.load(Ordering::Relaxed)
+    }
 }
 
 struct Writer {
@@ -39,7 +48,14 @@ pub struct OutputGroup {
 }
 
 impl OutputGroup {
-    pub fn open(app: &Arc<App>, outputs: &[OutputCfg], rate: u32, channels: u32, latency_ms: u32) -> OutputGroup {
+    pub fn open(
+        app: &Arc<App>,
+        outputs: &[OutputCfg],
+        rate: u32,
+        channels: u32,
+        latency_ms: u32,
+        source_stop: &Arc<AtomicBool>,
+    ) -> OutputGroup {
         let enabled: Vec<OutputCfg> = outputs.iter().filter(|o| o.enabled).cloned().collect();
         let max_delay = enabled.iter().map(|o| o.delay_ms).max().unwrap_or(0) as usize;
         let high_water = (rate as usize * channels as usize * (latency_ms as usize + max_delay)) / 1000;
@@ -53,6 +69,7 @@ impl OutputGroup {
                     stop: AtomicBool::new(false),
                     abort: AtomicBool::new(false),
                     dead: AtomicBool::new(false),
+                    source_stop: source_stop.clone(),
                 });
                 let r = ring.clone();
                 let app = app.clone();
@@ -117,9 +134,21 @@ impl OutputGroup {
             w.ring.stop.store(true, Ordering::Relaxed);
             w.ring.cv.notify_all();
         }
+        // Wait for the writers to close their sound cards, but never hang: a driver that
+        // blocks in a write must not freeze the source thread. Stuck writers are detached.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while self.writers.iter().any(|w| w.handle.as_ref().is_some_and(|h| !h.is_finished()))
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         for w in &mut self.writers {
             if let Some(h) = w.handle.take() {
-                let _ = h.join();
+                if h.is_finished() {
+                    let _ = h.join();
+                } else {
+                    log::warn!("an output did not close in time; leaving it to finish on its own");
+                }
             }
         }
     }
@@ -174,16 +203,21 @@ fn writer(app: Arc<App>, cfg: OutputCfg, ring: Arc<Ring>, rate: u32, channels: u
         }
     };
 
+    // The previous source may still hold the card for a moment: retry quickly at first.
+    let started = Instant::now();
     loop {
+        if ring.aborted() {
+            break;
+        }
         // Wait for a period of data (or stop).
         let mut buf = ring.buf.lock().unwrap();
-        while buf.len() < period * ch && !ring.stop.load(Ordering::Relaxed) {
+        while buf.len() < period * ch && !ring.stop.load(Ordering::Relaxed) && !ring.aborted() {
             buf = ring.cv.wait_timeout(buf, Duration::from_millis(20)).unwrap().0;
             if out.is_none() {
                 break;
             }
         }
-        if ring.stop.load(Ordering::Relaxed) && (buf.is_empty() || out.is_none()) {
+        if ring.aborted() || (ring.stop.load(Ordering::Relaxed) && (buf.len() < ch || out.is_none())) {
             break;
         }
         let ring_frames = buf.len() / ch;
@@ -206,6 +240,11 @@ fn writer(app: Arc<App>, cfg: OutputCfg, ring: Arc<Ring>, rate: u32, channels: u
                         set_output_status(&app, &cfg.device, "playing");
                         out = Some(o);
                     }
+                    Err(e) if started.elapsed() < Duration::from_secs(2) => {
+                        // Usually "device busy" while the previous source closes it.
+                        log::debug!("output {} not ready yet: {e}", cfg.device);
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
                     Err(e) => {
                         if !ring.dead.swap(true, Ordering::Relaxed) {
                             log::warn!("output {} unavailable: {e}", cfg.device);
@@ -227,6 +266,8 @@ fn writer(app: Arc<App>, cfg: OutputCfg, ring: Arc<Ring>, rate: u32, channels: u
         drop(buf);
         ring.cv.notify_all();
         if chunk.is_empty() {
+            // Cannot happen with whole frames; never spin at real-time priority.
+            std::thread::sleep(Duration::from_millis(5));
             continue;
         }
 
@@ -278,7 +319,7 @@ fn writer(app: Arc<App>, cfg: OutputCfg, ring: Arc<Ring>, rate: u32, channels: u
         }
     }
     if let Some(o) = out {
-        if ring.abort.load(Ordering::Relaxed) {
+        if ring.aborted() {
             o.drop_now();
         } else {
             o.drain();

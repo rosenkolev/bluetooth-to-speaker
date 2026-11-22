@@ -1,7 +1,7 @@
 use crate::config::Config;
 use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, watch};
@@ -113,6 +113,19 @@ pub struct App {
     pub outputs_gen: AtomicU64,
     /// Unix seconds since the output went idle (0 = playing).
     pub idle_since: AtomicU64,
+    /// Settings changed and not yet written (see `save_config`).
+    config_dirty: AtomicBool,
+    save_requested: tokio::sync::Notify,
+}
+
+/// Main volume 0..100 to the AVRCP absolute volume 0..127, and back. Rounded so that
+/// a round trip returns the same value (no flapping between the phone and the speaker).
+pub fn to_avrcp(v: u8) -> u16 {
+    ((v.min(100) as u32 * 127 + 50) / 100) as u16
+}
+
+pub fn from_avrcp(v: u16) -> u8 {
+    ((v.min(127) as u32 * 100 + 63) / 127) as u8
 }
 
 impl App {
@@ -133,6 +146,8 @@ impl App {
             output: crate::player::OutputArbiter::default(),
             outputs_gen: AtomicU64::new(0),
             idle_since: AtomicU64::new(now()),
+            config_dirty: AtomicBool::new(false),
+            save_requested: tokio::sync::Notify::new(),
         });
         (app, bt_rx)
     }
@@ -177,6 +192,7 @@ impl App {
             cfg.volume = v;
         }
         self.notify();
+        self.save_config();
     }
 
     /// Current volume of one output (0..100); 100 if unknown.
@@ -274,8 +290,29 @@ impl App {
         }
     }
 
+    /// Ask for the settings to be saved. The saver task writes them a moment later, so a
+    /// dragged slider causes one write instead of dozens (SD cards wear out).
     pub fn save_config(&self) {
-        self.cfg.read().unwrap().save(&self.data_dir);
+        self.config_dirty.store(true, Ordering::Relaxed);
+        self.save_requested.notify_one();
+    }
+
+    /// Write pending settings now (blocking file I/O).
+    pub fn flush_config(&self) {
+        if self.config_dirty.swap(false, Ordering::Relaxed) {
+            let cfg = self.cfg();
+            cfg.save(&self.data_dir);
+        }
+    }
+
+    /// Background task: writes settings at most every 2 seconds.
+    pub async fn run_saver(self: Arc<Self>) {
+        loop {
+            self.save_requested.notified().await;
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let app = self.clone();
+            let _ = tokio::task::spawn_blocking(move || app.flush_config()).await;
+        }
     }
 
     /// Full state for the web UI and MQTT.
@@ -320,4 +357,18 @@ fn load_uid(data_dir: &std::path::Path) -> String {
 
 pub fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn avrcp_volume_round_trip() {
+        for v in 0..=100u8 {
+            assert_eq!(from_avrcp(to_avrcp(v)), v, "volume {v}");
+        }
+        assert_eq!(to_avrcp(100), 127);
+        assert_eq!(from_avrcp(127), 100);
+    }
 }

@@ -19,3 +19,9 @@ not in a public issue. You get an answer within a week.
   provenance attestation (`gh attestation verify`).
 - **Network:** the web UI and the DLNA player have no login. They are meant for your home
   network; do not expose port 8780 to the internet.
+- **Other web sites:** the API refuses changes requested by other web sites through your
+  browser (cross-site request forgery), so a page you visit cannot open pairing or remove phones.
+- **Settings:** sound output names are restricted to plain ALSA device and mixer names;
+  ALSA configuration strings, which could run programs, are refused. The settings file,
+  which holds the MQTT password, is readable only by its owner.
+- **Discovery:** SSDP answers only senders on the local network.

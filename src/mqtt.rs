@@ -32,7 +32,7 @@ pub async fn run(app: Arc<App>) {
         opts.set_credentials(cfg.mqtt.username.clone(), cfg.mqtt.password.clone());
     }
     opts.set_last_will(LastWill::new(avail.clone(), "offline", QoS::AtLeastOnce, true));
-    let (client, mut events) = AsyncClient::new(opts, 32);
+    let (client, mut events) = AsyncClient::new(opts, 64);
 
     // Publish state on every change (debounced); re-announce entities when outputs change.
     {
@@ -67,10 +67,17 @@ pub async fn run(app: Arc<App>) {
         match events.poll().await {
             Ok(Event::Incoming(Packet::ConnAck(_))) => {
                 log::info!("mqtt connected to {}:{}", cfg.mqtt.host, cfg.mqtt.port);
-                publish_discovery(&app, &client, &cfg.mqtt.discovery_prefix, &node, &base).await;
-                let _ = client.subscribe(format!("{base}/cmd/#"), QoS::AtLeastOnce).await;
-                let _ = client.publish(&avail, QoS::AtLeastOnce, true, "online").await;
-                let _ = client.publish(format!("{base}/state"), QoS::AtMostOnce, true, state_json(&app)).await;
+                // In its own task: publishing waits for room in the client queue, which only
+                // this loop empties. Awaiting it here could block the loop on itself.
+                let (app, client) = (app.clone(), client.clone());
+                let (prefix, node, base, avail) =
+                    (cfg.mqtt.discovery_prefix.clone(), node.clone(), base.clone(), avail.clone());
+                tokio::spawn(async move {
+                    publish_discovery(&app, &client, &prefix, &node, &base).await;
+                    let _ = client.subscribe(format!("{base}/cmd/#"), QoS::AtLeastOnce).await;
+                    let _ = client.publish(&avail, QoS::AtLeastOnce, true, "online").await;
+                    let _ = client.publish(format!("{base}/state"), QoS::AtMostOnce, true, state_json(&app)).await;
+                });
             }
             Ok(Event::Incoming(Packet::Publish(p))) => {
                 let payload = String::from_utf8_lossy(&p.payload).trim().to_string();
@@ -79,8 +86,10 @@ pub async fn run(app: Arc<App>) {
                     let device =
                         app.cfg().outputs.iter().find(|o| output_id(&o.device) == id).map(|o| o.device.clone());
                     if let (Some(device), Ok(v)) = (device, payload.parse::<f32>()) {
-                        app.set_output_volume(&device, v.clamp(0.0, 100.0) as u8);
-                        app.save_config();
+                        if v.is_finite() {
+                            app.set_output_volume(&device, v.clamp(0.0, 100.0).round() as u8);
+                            app.save_config();
+                        }
                     }
                     continue;
                 }
@@ -98,8 +107,9 @@ pub async fn run(app: Arc<App>) {
                     }
                     "volume" => {
                         if let Ok(v) = payload.parse::<f32>() {
-                            app.set_volume(v.clamp(0.0, 100.0) as u8, false);
-                            app.save_config();
+                            if v.is_finite() {
+                                app.set_volume(v.clamp(0.0, 100.0).round() as u8, false);
+                            }
                         }
                     }
                     "media" => {

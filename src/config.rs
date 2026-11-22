@@ -133,10 +133,20 @@ impl Config {
     }
 
     pub fn load(data_dir: &Path) -> Config {
-        let mut cfg: Config = std::fs::read_to_string(Self::path(data_dir))
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let path = Self::path(data_dir);
+        let mut cfg: Config = match std::fs::read_to_string(&path) {
+            Ok(s) => match serde_json::from_str(&s) {
+                Ok(c) => c,
+                Err(e) => {
+                    // Keep the broken file for the user instead of overwriting it with defaults.
+                    let bad = data_dir.join("config.json.bad");
+                    log::error!("settings file is invalid ({e}); kept as {} and using defaults", bad.display());
+                    let _ = std::fs::rename(&path, bad);
+                    Config::default()
+                }
+            },
+            Err(_) => Config::default(),
+        };
         // Environment overrides, handy for compose files.
         if let Ok(v) = std::env::var("BT_NAME") {
             cfg.name = v;
@@ -186,14 +196,25 @@ impl Config {
         if self.name.trim().is_empty() {
             self.name = "Bluetooth Speaker".into();
         }
-        self.outputs.retain(|o| !o.device.trim().is_empty());
+        self.outputs.retain(|o| {
+            let ok = safe_alsa_device(o.device.trim());
+            if !ok {
+                log::warn!("output \"{}\" ignored: not a plain ALSA device name", o.device);
+            }
+            ok
+        });
         let mut seen = std::collections::HashSet::new();
         self.outputs.retain(|o| seen.insert(o.device.clone()));
         self.outputs.truncate(8);
         for o in &mut self.outputs {
             o.volume = o.volume.min(100);
             o.default_volume = o.default_volume.min(100);
+            o.device = o.device.trim().to_string();
             o.mixer = o.mixer.trim().to_string();
+            if !o.mixer.is_empty() && !safe_alsa_mixer(&o.mixer) {
+                log::warn!("mixer \"{}\" ignored: not a plain control name", o.mixer);
+                o.mixer.clear();
+            }
             o.delay_ms = o.delay_ms.min(2000);
             if o.name.trim().is_empty() {
                 o.name = o.device.clone();
@@ -204,11 +225,80 @@ impl Config {
         }
     }
 
+    /// Atomic and durable: write a temporary file, flush it to disk, then rename it,
+    /// so a power cut leaves either the old or the new settings, never an empty file.
     pub fn save(&self, data_dir: &Path) {
+        use std::io::Write;
         let tmp = data_dir.join("config.json.tmp");
         let Ok(s) = serde_json::to_string_pretty(self) else { return };
-        if let Err(e) = std::fs::write(&tmp, s).and_then(|_| std::fs::rename(&tmp, Self::path(data_dir))) {
+        let res = (|| -> std::io::Result<()> {
+            // Owner-only: the file holds the MQTT password.
+            let mut f = {
+                use std::os::unix::fs::OpenOptionsExt;
+                std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?
+            };
+            f.write_all(s.as_bytes())?;
+            f.sync_all()?;
+            std::fs::rename(&tmp, Self::path(data_dir))?;
+            if let Ok(dir) = std::fs::File::open(data_dir) {
+                let _ = dir.sync_all();
+            }
+            Ok(())
+        })();
+        if let Err(e) = res {
             log::warn!("cannot save settings in {}: {e} (is the folder writable by root?)", data_dir.display());
         }
+    }
+}
+
+/// ALSA PCM plugins that may be named. ALSA also accepts inline configuration in a
+/// device name, including the `file` plugin with `|command`, which runs a program;
+/// only plain `plugin:arguments` names from this list are accepted.
+const ALSA_PLUGINS: &[&str] =
+    &["default", "sysdefault", "hw", "plughw", "plug", "dmix", "front", "iec958", "hdmi", "null", "pulse", "pipewire"];
+
+/// A plain ALSA device name such as `plughw:CARD=rockchipes8316,DEV=0`.
+pub fn safe_alsa_device(s: &str) -> bool {
+    let (plugin, args) = s.split_once(':').unwrap_or((s, ""));
+    s.len() <= 100
+        && ALSA_PLUGINS.contains(&plugin)
+        && args.chars().all(|c| c.is_ascii_alphanumeric() || "_-.:=,".contains(c))
+}
+
+/// A plain mixer control name such as `DAC` or `Headphone Mixer`.
+pub fn safe_alsa_mixer(s: &str) -> bool {
+    s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || " _-.".contains(c))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alsa_names() {
+        assert!(safe_alsa_device("default"));
+        assert!(safe_alsa_device("plughw:CARD=rockchipes8316,DEV=0"));
+        assert!(safe_alsa_device("plug:dmix:CARD=x"));
+        assert!(!safe_alsa_device("file:'|sh -c id'"));
+        assert!(!safe_alsa_device("file:FILE=/data/x"));
+        assert!(!safe_alsa_device("plughw:{type hooks}"));
+        assert!(!safe_alsa_device("plughw:CARD=x DEV=0"));
+        assert!(safe_alsa_mixer("Headphone Mixer"));
+        assert!(!safe_alsa_mixer("DAC'"));
+    }
+
+    #[test]
+    fn sanitize_drops_unsafe_outputs() {
+        let mut c = Config {
+            outputs: vec![
+                OutputCfg { device: "file:'|touch /tmp/x'".into(), ..Default::default() },
+                OutputCfg { device: "hw:1,0".into(), mixer: "x;y".into(), ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        c.sanitize();
+        assert_eq!(c.outputs.len(), 1);
+        assert_eq!(c.outputs[0].device, "hw:1,0");
+        assert_eq!(c.outputs[0].mixer, "");
     }
 }

@@ -73,6 +73,11 @@ LOCATION: http://{ip}:{port}/dlna/description.xml\r\nNT: {nt}\r\nNTS: {kind}\r\n
             }
             r = sock.recv_from(&mut buf) => {
                 let Ok((n, src)) = r else { continue };
+                // Answer only the local network: SSDP replies can be abused to flood a spoofed
+                // address (reflection) if the port is reachable from outside.
+                if !is_local(src.ip()) {
+                    continue;
+                }
                 let msg = String::from_utf8_lossy(&buf[..n]);
                 if !msg.starts_with("M-SEARCH") {
                     continue;
@@ -87,6 +92,20 @@ LOCATION: http://{ip}:{port}/dlna/description.xml\r\nNT: {nt}\r\nNTS: {kind}\r\n
                     let _ = sock.send_to(resp.as_bytes(), src).await;
                 }
             }
+        }
+    }
+}
+
+fn is_local(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_link_local()
+                || v4.is_loopback()
+                || v4.octets()[0] == 100 && v4.octets()[1] & 0xc0 == 64
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback() || (v6.segments()[0] & 0xffc0) == 0xfe80 || (v6.segments()[0] & 0xfe00) == 0xfc00
         }
     }
 }

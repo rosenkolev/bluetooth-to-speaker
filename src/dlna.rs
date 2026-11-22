@@ -137,7 +137,7 @@ impl Dlna {
         match action {
             "SetAVTransportURI" => {
                 let uri = arg(body, "CurrentURI").unwrap_or_default();
-                if !(uri.starts_with("http://") || uri.starts_with("https://")) {
+                if !(uri.starts_with("http://") || uri.starts_with("https://")) || uri.len() > 8192 {
                     return Err((714, "Illegal MIME-type"));
                 }
                 let meta = arg(body, "CurrentURIMetaData").unwrap_or_default();
@@ -149,7 +149,11 @@ impl Dlna {
                     m.meta = meta;
                     m.title = title.clone();
                 }
-                self.app.update_status(|s| s.network = Some(NetworkPlayback { uri, title, state: "STOPPED".into() }));
+                // Shown in the web UI without the query string, which may hold an access token.
+                let shown = uri.split('?').next().unwrap_or_default().to_string();
+                self.app.update_status(|s| {
+                    s.network = Some(NetworkPlayback { uri: shown, title, state: "STOPPED".into() })
+                });
                 // Controllers expect a playing renderer to switch to the new URI at once.
                 if was_playing {
                     self.start();
@@ -309,11 +313,10 @@ impl Dlna {
         self.set_state("PLAYING");
         let app = self.app.clone();
         let net = self.net.clone();
-        log::info!("dlna play {uri}");
-        let res = std::thread::Builder::new().name("net-audio".into()).spawn(move || {
-            crate::bluez::raise_priority();
-            run_network(app, uri, net, lease)
-        });
+        // Only the host: media URLs of Home Assistant carry signed access tokens.
+        log::info!("dlna play from {}", uri.split('/').nth(2).unwrap_or("?"));
+        // Normal priority: HTTP and decoding may burst; only the output writers are real-time.
+        let res = std::thread::Builder::new().name("net-audio".into()).spawn(move || run_network(app, uri, net, lease));
         if let Err(e) = res {
             log::error!("cannot start network audio thread: {e}");
         }

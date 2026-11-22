@@ -175,7 +175,7 @@ async function save(e){
   cfg.dlna.enabled=$('c_dlna').checked;
   Object.assign(cfg.mqtt,{enabled:$('c_mqtt').checked,host:$('c_mhost').value,port:+$('c_mport').value,username:$('c_muser').value,password:$('c_mpass').value});
   const r=await (await api('config',{method:'PUT',body:JSON.stringify(cfg)})).json();
-  $('saved').textContent=r.restart_needed?'Saved. Restart the app to apply all changes.':'Saved.';
+  $('saved').textContent=!r.ok?('Not saved: '+(r.error||'error')):r.restart_needed?'Saved. Restart the app to apply all changes.':'Saved.';
   setTimeout(()=>$('saved').textContent='',5000);await loadCfg();refresh();
 }
 loadCfg();refresh();setInterval(refresh,1500);

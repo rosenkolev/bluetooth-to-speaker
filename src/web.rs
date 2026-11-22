@@ -1,9 +1,10 @@
 //! Web UI and JSON API.
 
 use crate::app::{App, BtCmd};
-use crate::config::Config;
-use axum::extract::{Path, State};
-use axum::http::{header, StatusCode};
+use crate::config::{safe_alsa_device, safe_alsa_mixer, Config};
+use axum::extract::{Path, Request, State};
+use axum::http::{header, Method, StatusCode};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -17,7 +18,7 @@ pub async fn run(app: Arc<App>) {
     let router = Router::new()
         .route("/", get(|| async { ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], INDEX) }))
         .route("/api/state", get(state))
-        .route("/api/outputs", get(|| async { Json(crate::output::list_devices()) }))
+        .route("/api/outputs", get(outputs))
         .route("/api/outputs/enable", post(enable_output))
         .route("/api/outputs/volume", post(output_volume))
         .route("/api/outputs/restore", post(restore_volumes))
@@ -27,6 +28,7 @@ pub async fn run(app: Arc<App>) {
         .route("/api/volume", post(volume))
         .route("/api/media/{action}", post(media))
         .route("/api/devices/{addr}/{action}", post(device))
+        .layer(axum::middleware::from_fn(same_site_only))
         .with_state(app.clone());
     let router = if app.cfg().dlna.enabled { router.merge(crate::dlna::router(app.clone())) } else { router };
     let listener = match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
@@ -42,8 +44,40 @@ pub async fn run(app: Arc<App>) {
     }
 }
 
+/// Refuse changes requested by other web sites (cross-site request forgery): a page on
+/// the internet must not be able to open pairing or remove phones through the browser of
+/// someone at home. Browsers mark such requests with `Sec-Fetch-Site: cross-site`; older
+/// ones are checked by `Origin`. Requests through Home Assistant ingress are allowed.
+async fn same_site_only(req: Request, next: Next) -> Response {
+    if req.method() != Method::GET && req.method() != Method::HEAD {
+        let h = req.headers();
+        let text = |name: &str| h.get(name).and_then(|v| v.to_str().ok());
+        let cross = match text("sec-fetch-site") {
+            Some(site) => site == "cross-site",
+            None => match (text("origin"), text("host")) {
+                (Some(origin), Some(host)) => {
+                    text("x-ingress-path").is_none() && origin.split("://").nth(1) != Some(host)
+                }
+                _ => false, // not a browser (curl, Home Assistant)
+            },
+        };
+        if cross {
+            return (StatusCode::FORBIDDEN, "cross-site request refused").into_response();
+        }
+    }
+    next.run(req).await
+}
+
 async fn state(State(app): State<Arc<App>>) -> Json<serde_json::Value> {
     Json(app.snapshot())
+}
+
+async fn outputs() -> Response {
+    // Opens every sound card's mixer: blocking work, kept off the async thread.
+    match tokio::task::spawn_blocking(crate::output::list_devices).await {
+        Ok(list) => Json(list).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 async fn get_config(State(app): State<Arc<App>>) -> Json<Config> {
@@ -53,6 +87,14 @@ async fn get_config(State(app): State<Arc<App>>) -> Json<Config> {
 }
 
 async fn put_config(State(app): State<Arc<App>>, Json(mut new): Json<Config>) -> Response {
+    if let Some(o) = new
+        .outputs
+        .iter()
+        .find(|o| !safe_alsa_device(o.device.trim()) || !(o.mixer.trim().is_empty() || safe_alsa_mixer(o.mixer.trim())))
+    {
+        let msg = format!("output \"{}\": not a plain ALSA device or mixer name", o.device);
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "ok": false, "error": msg }))).into_response();
+    }
     new.sanitize();
     let old = app.cfg();
     if new.mqtt.password == "********" {
@@ -97,8 +139,7 @@ struct VolumeReq {
 }
 
 async fn volume(State(app): State<Arc<App>>, Json(req): Json<VolumeReq>) -> StatusCode {
-    app.set_volume(req.volume.min(100), false);
-    app.save_config();
+    app.set_volume(req.volume.min(100), false); // saved by the saver task
     StatusCode::NO_CONTENT
 }
 

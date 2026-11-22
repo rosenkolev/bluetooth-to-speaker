@@ -36,6 +36,7 @@ fn main() {
     // One thread for all control work; audio runs on its own threads.
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio runtime");
     rt.block_on(async move {
+        tokio::spawn(app.clone().run_saver());
         tokio::spawn(bluez::run(app.clone(), bt_rx));
         tokio::spawn(web::run(app.clone()));
         tokio::spawn(mqtt::run(app.clone()));
@@ -50,6 +51,6 @@ fn main() {
         log::info!("stopping");
         app.output.stop_source(app::Source::Bluetooth);
         app.output.stop_source(app::Source::Network);
-        app.save_config();
+        app.flush_config();
     });
 }
