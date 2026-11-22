@@ -246,7 +246,7 @@ down)
 \$D exec $NAME sh -c 'docker ps -aq | xargs -r docker rm -f >/dev/null; docker system prune -af --volumes >/dev/null' 2>/dev/null || true
 cd \$S && \$D compose down -v
 \$D run --rm -v \$S:/s $DIND sh -c 'rm -rf /s/engine /s/workspace'
-cd && rm -rf \$S"
+cd && rm -rf \$S && \$D rmi $DIND >/dev/null"
   echo "sandbox removed"
   ;;
 *)
