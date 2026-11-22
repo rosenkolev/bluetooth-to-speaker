@@ -49,7 +49,7 @@ jobs:
       - uses: DavidAnson/markdownlint-cli2-action@v24
         with:
           globs: "**/*.md"
-      - uses: streetsidesoftware/cspell-action@v6
+      - uses: streetsidesoftware/cspell-action@v9
         with:
           incremental_files_only: false
       - name: Compose file
