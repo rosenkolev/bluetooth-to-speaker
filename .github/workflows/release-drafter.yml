@@ -21,6 +21,6 @@ jobs:
     steps:
       # Drafts the next release notes as pull requests are merged into "main".
       # Publishing the draft creates the tag, which builds and publishes the release images.
-      - uses: release-drafter/release-drafter@v6
+      - uses: release-drafter/release-drafter@v7
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
