@@ -46,7 +46,7 @@ jobs:
           dockerfile: Dockerfile
       - name: ShellCheck
         run: shellcheck scripts/*.sh
-      - uses: DavidAnson/markdownlint-cli2-action@v19
+      - uses: DavidAnson/markdownlint-cli2-action@v24
         with:
           globs: "**/*.md"
       - uses: streetsidesoftware/cspell-action@v6
