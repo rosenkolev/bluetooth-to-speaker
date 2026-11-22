@@ -6,13 +6,14 @@ use crate::app::{App, BtCmd, DeviceInfo, Source};
 use crate::player::{run_bt_stream, Lease};
 use futures_util::StreamExt;
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use zbus::message::Type as MsgType;
-use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value};
 use zbus::{Connection, MatchRule, Message, MessageStream};
+use zbus::{ObjectPath, OwnedObjectPath, OwnedVariant, Variant};
 
 const BLUEZ: &str = "org.bluez";
 const A2DP_SINK_UUID: &str = "0000110b-0000-1000-8000-00805f9b34fb";
@@ -23,7 +24,7 @@ const IF_DEVICE: &str = "org.bluez.Device1";
 const IF_TRANSPORT: &str = "org.bluez.MediaTransport1";
 const IF_PLAYER: &str = "org.bluez.MediaPlayer1";
 
-type ManagedObjects = HashMap<OwnedObjectPath, HashMap<String, HashMap<String, OwnedValue>>>;
+type ManagedObjects = HashMap<OwnedObjectPath, HashMap<String, HashMap<String, OwnedVariant>>>;
 
 // ---------------------------------------------------------------- endpoint
 
@@ -40,7 +41,7 @@ struct Endpoint {
 
 #[zbus::interface(name = "org.bluez.MediaEndpoint1")]
 impl Endpoint {
-    async fn set_configuration(&self, transport: OwnedObjectPath, properties: HashMap<String, OwnedValue>) {
+    async fn set_configuration(&self, transport: OwnedObjectPath, properties: HashMap<String, OwnedVariant>) {
         let device = properties.get("Device").and_then(v_str).unwrap_or_default();
         let _ = self.tx.send(EpEvent::SetConfiguration { transport: transport.to_string(), device });
     }
@@ -202,15 +203,15 @@ async fn session(app: &Arc<App>, rx: &mut mpsc::UnboundedReceiver<BtCmd>, first:
     let conn = Connection::system().await?;
     let adapter = format!("/org/bluez/{}", cfg.adapter);
 
-    let rule = MatchRule::builder().msg_type(MsgType::Signal).sender(BLUEZ)?.build();
-    let mut bluez_signals = MessageStream::for_match_rule(rule, &conn, Some(256)).await?;
+    let rule = MatchRule::builder().msg_type(MsgType::Signal).sender(BLUEZ).build()?;
+    let mut bluez_signals = MessageStream::for_match_rule(rule, &conn, NonZeroUsize::new(256)).await?;
     let rule = MatchRule::builder()
         .msg_type(MsgType::Signal)
-        .sender("org.freedesktop.DBus")?
-        .member("NameOwnerChanged")?
-        .add_arg(BLUEZ)?
-        .build();
-    let mut owner_signals = MessageStream::for_match_rule(rule, &conn, Some(16)).await?;
+        .sender("org.freedesktop.DBus")
+        .member("NameOwnerChanged")
+        .add_arg(BLUEZ)
+        .build()?;
+    let mut owner_signals = MessageStream::for_match_rule(rule, &conn, NonZeroUsize::new(16)).await?;
 
     let objects = managed_objects(&conn).await?;
     if !objects.iter().any(|(p, i)| p.as_str() == adapter && i.contains_key(IF_ADAPTER)) {
@@ -225,21 +226,21 @@ async fn session(app: &Arc<App>, rx: &mut mpsc::UnboundedReceiver<BtCmd>, first:
     // Adapter: powered, hidden, named.
     let powered = get_prop(&conn, &adapter, IF_ADAPTER, "Powered").await.ok().and_then(|v| v_bool(&v));
     if powered == Some(false) {
-        set_prop(&conn, &adapter, IF_ADAPTER, "Powered", Value::Bool(true)).await?;
+        set_prop(&conn, &adapter, IF_ADAPTER, "Powered", Variant::Bool(true)).await?;
     }
-    set_prop(&conn, &adapter, IF_ADAPTER, "Alias", Value::from(cfg.name.as_str())).await?;
-    set_prop(&conn, &adapter, IF_ADAPTER, "Discoverable", Value::Bool(false)).await?;
-    set_prop(&conn, &adapter, IF_ADAPTER, "Pairable", Value::Bool(false)).await?;
+    set_prop(&conn, &adapter, IF_ADAPTER, "Alias", Variant::from(cfg.name.as_str())).await?;
+    set_prop(&conn, &adapter, IF_ADAPTER, "Discoverable", Variant::Bool(false)).await?;
+    set_prop(&conn, &adapter, IF_ADAPTER, "Pairable", Variant::Bool(false)).await?;
     let address =
         get_prop(&conn, &adapter, IF_ADAPTER, "Address").await.ok().and_then(|v| v_str(&v)).unwrap_or_default();
 
     // A2DP sink endpoint.
     let (ep_tx, mut ep_rx) = mpsc::unbounded_channel();
     conn.object_server().at(ENDPOINT_PATH, Endpoint { tx: ep_tx, max_bitpool: cfg.max_bitpool }).await?;
-    let mut props: HashMap<&str, Value> = HashMap::new();
-    props.insert("UUID", Value::from(A2DP_SINK_UUID));
-    props.insert("Codec", Value::U8(0)); // SBC
-    props.insert("Capabilities", Value::from(sbc_capabilities(cfg.max_bitpool)));
+    let mut props: HashMap<&str, Variant> = HashMap::new();
+    props.insert("UUID", Variant::from(A2DP_SINK_UUID));
+    props.insert("Codec", Variant::U8(0)); // SBC
+    props.insert("Capabilities", Variant::from(sbc_capabilities(cfg.max_bitpool)));
     call(&conn, &adapter, "org.bluez.Media1", "RegisterEndpoint", &(ObjectPath::try_from(ENDPOINT_PATH)?, props))
         .await?;
 
@@ -355,7 +356,7 @@ impl Session<'_> {
             "PropertiesChanged" if !self.is_ours(&path) => {}
             "PropertiesChanged" => {
                 let Ok((iface, changed, _)) =
-                    msg.body().deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
+                    msg.body().deserialize::<(String, HashMap<String, OwnedVariant>, Vec<String>)>()
                 else {
                     return;
                 };
@@ -371,7 +372,7 @@ impl Session<'_> {
                     IF_DEVICE => {
                         if changed.get("Paired").and_then(v_bool) == Some(true) {
                             log::info!("paired: {}", addr_of(&path));
-                            let _ = set_prop(&self.conn, &path, IF_DEVICE, "Trusted", Value::Bool(true)).await;
+                            let _ = set_prop(&self.conn, &path, IF_DEVICE, "Trusted", Variant::Bool(true)).await;
                             self.close_pairing().await; // one new phone per window
                         }
                         match changed.get("Connected").and_then(v_bool) {
@@ -419,7 +420,7 @@ impl Session<'_> {
             }
             // Only paired devices matter; BLE devices come and go all the time.
             "InterfacesAdded" => {
-                type Added = (OwnedObjectPath, HashMap<String, HashMap<String, OwnedValue>>);
+                type Added = (OwnedObjectPath, HashMap<String, HashMap<String, OwnedVariant>>);
                 let Ok((obj, ifaces)) = msg.body().deserialize::<Added>() else { return };
                 let paired = ifaces.get(IF_DEVICE).and_then(|d| d.get("Paired")).and_then(v_bool).unwrap_or(false);
                 if paired || self.known.contains(&addr_of(obj.as_str())) {
@@ -449,7 +450,7 @@ impl Session<'_> {
                 }
                 // Tell the phone our volume.
                 let vol = crate::app::to_avrcp(self.app.volume());
-                let _ = set_prop(&self.conn, &transport, IF_TRANSPORT, "Volume", Value::U16(vol)).await;
+                let _ = set_prop(&self.conn, &transport, IF_TRANSPORT, "Volume", Variant::U16(vol)).await;
             }
             EpEvent::ClearConfiguration { transport } => {
                 if let Some(t) = self.transports.remove(&transport) {
@@ -492,8 +493,7 @@ impl Session<'_> {
                         return;
                     }
                 };
-                let Ok((fd, read_mtu, _write_mtu)) = reply.body().deserialize::<(zbus::zvariant::OwnedFd, u16, u16)>()
-                else {
+                let Ok((fd, read_mtu, _write_mtu)) = reply.body().deserialize::<(zbus::OwnedFd, u16, u16)>() else {
                     log::warn!("bad Acquire reply");
                     return;
                 };
@@ -578,7 +578,7 @@ impl Session<'_> {
             BtCmd::VolumeChanged(v) => {
                 let vol = crate::app::to_avrcp(v);
                 for path in self.transports.keys() {
-                    let _ = set_prop(&self.conn, path, IF_TRANSPORT, "Volume", Value::U16(vol)).await;
+                    let _ = set_prop(&self.conn, path, IF_TRANSPORT, "Volume", Variant::U16(vol)).await;
                 }
             }
             BtCmd::Connect(addr) => self.device_call(&addr, IF_DEVICE, "Connect"),
@@ -599,7 +599,7 @@ impl Session<'_> {
                 }
             }
             BtCmd::Rename(name) => {
-                let _ = set_prop(&self.conn, &self.adapter, IF_ADAPTER, "Alias", Value::from(name.as_str())).await;
+                let _ = set_prop(&self.conn, &self.adapter, IF_ADAPTER, "Alias", Variant::from(name.as_str())).await;
             }
             BtCmd::Preempted(addr) => {
                 // Home Assistant took the speaker. Pause the phone but keep it connected,
@@ -667,10 +667,10 @@ impl Session<'_> {
 
     async fn open_pairing(&mut self) {
         let secs = self.app.cfg().pairing_window_secs;
-        let _ = set_prop(&self.conn, &self.adapter, IF_ADAPTER, "PairableTimeout", Value::U32(0)).await;
-        let _ = set_prop(&self.conn, &self.adapter, IF_ADAPTER, "DiscoverableTimeout", Value::U32(secs as u32)).await;
-        let _ = set_prop(&self.conn, &self.adapter, IF_ADAPTER, "Pairable", Value::Bool(true)).await;
-        let _ = set_prop(&self.conn, &self.adapter, IF_ADAPTER, "Discoverable", Value::Bool(true)).await;
+        let _ = set_prop(&self.conn, &self.adapter, IF_ADAPTER, "PairableTimeout", Variant::U32(0)).await;
+        let _ = set_prop(&self.conn, &self.adapter, IF_ADAPTER, "DiscoverableTimeout", Variant::U32(secs as u32)).await;
+        let _ = set_prop(&self.conn, &self.adapter, IF_ADAPTER, "Pairable", Variant::Bool(true)).await;
+        let _ = set_prop(&self.conn, &self.adapter, IF_ADAPTER, "Discoverable", Variant::Bool(true)).await;
         self.app.pairing_until.store(crate::app::now() + secs, Ordering::Relaxed);
         self.pairing_was_open = true;
         log::info!("pairing window open for {secs}s");
@@ -680,8 +680,8 @@ impl Session<'_> {
     async fn close_pairing(&mut self) {
         self.app.pairing_until.store(0, Ordering::Relaxed);
         if self.pairing_was_open {
-            let _ = set_prop(&self.conn, &self.adapter, IF_ADAPTER, "Discoverable", Value::Bool(false)).await;
-            let _ = set_prop(&self.conn, &self.adapter, IF_ADAPTER, "Pairable", Value::Bool(false)).await;
+            let _ = set_prop(&self.conn, &self.adapter, IF_ADAPTER, "Discoverable", Variant::Bool(false)).await;
+            let _ = set_prop(&self.conn, &self.adapter, IF_ADAPTER, "Pairable", Variant::Bool(false)).await;
             self.pairing_was_open = false;
             log::info!("pairing window closed");
         }
@@ -739,12 +739,12 @@ where
     with_timeout(conn.call_method(Some(BLUEZ), path, Some(iface), method, body)).await
 }
 
-async fn get_prop(conn: &Connection, path: &str, iface: &str, name: &str) -> zbus::Result<OwnedValue> {
+async fn get_prop(conn: &Connection, path: &str, iface: &str, name: &str) -> zbus::Result<OwnedVariant> {
     let reply = call(conn, path, "org.freedesktop.DBus.Properties", "Get", &(iface, name)).await?;
-    reply.body().deserialize::<OwnedValue>()
+    reply.body().deserialize::<OwnedVariant>()
 }
 
-async fn set_prop(conn: &Connection, path: &str, iface: &str, name: &str, value: Value<'_>) -> zbus::Result<()> {
+async fn set_prop(conn: &Connection, path: &str, iface: &str, name: &str, value: Variant<'_>) -> zbus::Result<()> {
     call(conn, path, "org.freedesktop.DBus.Properties", "Set", &(iface, name, value)).await?;
     Ok(())
 }
@@ -754,31 +754,31 @@ async fn managed_objects(conn: &Connection) -> zbus::Result<ManagedObjects> {
     reply.body().deserialize::<ManagedObjects>()
 }
 
-fn v_bool(v: &OwnedValue) -> Option<bool> {
+fn v_bool(v: &OwnedVariant) -> Option<bool> {
     match &**v {
-        Value::Bool(b) => Some(*b),
+        Variant::Bool(b) => Some(*b),
         _ => None,
     }
 }
 
-fn v_u16(v: &OwnedValue) -> Option<u16> {
+fn v_u16(v: &OwnedVariant) -> Option<u16> {
     match &**v {
-        Value::U16(x) => Some(*x),
+        Variant::U16(x) => Some(*x),
         _ => None,
     }
 }
 
-fn v_str(v: &OwnedValue) -> Option<String> {
+fn v_str(v: &OwnedVariant) -> Option<String> {
     match &**v {
-        Value::Str(s) => Some(s.to_string()),
-        Value::ObjectPath(p) => Some(p.to_string()),
+        Variant::Str(s) => Some(s.to_string()),
+        Variant::ObjectPath(p) => Some(p.to_string()),
         _ => None,
     }
 }
 
-fn v_dict(v: &OwnedValue) -> HashMap<String, String> {
+fn v_dict(v: &OwnedVariant) -> HashMap<String, String> {
     let Ok(owned) = v.try_clone() else { return HashMap::new() };
-    let Ok(map) = HashMap::<String, OwnedValue>::try_from(owned) else { return HashMap::new() };
+    let Ok(map) = HashMap::<String, OwnedVariant>::try_from(owned) else { return HashMap::new() };
     map.into_iter().filter_map(|(k, v)| v_str(&v).map(|s| (k, s))).collect()
 }
 

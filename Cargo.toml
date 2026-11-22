@@ -11,18 +11,18 @@ rust-version = "1.85"
 publish = false
 
 [dependencies]
-zbus = { version = "5", default-features = false, features = ["tokio"] }
+zbus = { version = "6", default-features = false, features = ["tokio", "service"] }
 tokio = { version = "1", features = ["rt", "macros", "net", "sync", "time", "signal", "io-util"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-alsa = "0.9"
+alsa = "0.12"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
-rumqttc = { version = "0.24", default-features = false }
+rumqttc = { version = "0.25", default-features = false }
 symphonia = { version = "0.5", default-features = false, features = ["mp3", "aac", "isomp4", "flac", "wav", "pcm", "ogg", "vorbis"] }
 ureq = { version = "2", default-features = false, features = ["tls"] }
-socket2 = { version = "0.5", features = ["all"] }
+socket2 = { version = "0.6", features = ["all"] }
 log = "0.4"
 env_logger = { version = "0.11", default-features = false }
 

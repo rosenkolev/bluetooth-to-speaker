@@ -8,6 +8,10 @@ updates:
       cargo:
         patterns: ["*"]
         update-types: [minor, patch]
+    ignore:
+      # symphonia 0.6 rewrote its decoding API; it needs its own port and a playback test.
+      - dependency-name: symphonia
+        versions: [">=0.6"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
