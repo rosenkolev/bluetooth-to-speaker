@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # 90 day stale policy for issues (not for issues labeled no-stale or help-wanted, not for PRs)
-      - uses: actions/stale@v9.1.0
+      - uses: actions/stale@v11.0.0
         with:
           days-before-stale: 90
           days-before-close: 7
