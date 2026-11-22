@@ -49,6 +49,7 @@
     "dockge",
     "faultcode",
     "faultstring",
+    "firewalld",
     "flac",
     "hadolint",
     "hassio",
