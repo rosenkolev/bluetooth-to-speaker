@@ -47,7 +47,8 @@ services:
     read_only: true
 ```
 
-Then open `http://<host>:8780` and press **Pair new phone**.
+Then open `http://<host>:8780` and press **Pair new phone**. With a host firewall
+(firewalld, ufw), open TCP 8780 and UDP 1900 first: see [troubleshooting](docs/troubleshooting.md#the-web-ui-does-not-open-from-other-devices).
 A commented version is in [deploy/compose.yaml](deploy/compose.yaml).
 
 ### Home Assistant add-on

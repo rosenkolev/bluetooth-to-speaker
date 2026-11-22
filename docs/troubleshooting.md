@@ -41,6 +41,21 @@ The log says `cannot save settings`. The data folder must be writable by root: t
 container runs as root without capabilities, so it cannot write to a folder owned by
 another user. Let Docker create the folder, or `sudo chown root: ./data`.
 
+## The web UI does not open from other devices
+
+It opens on the host itself (`curl http://127.0.0.1:8780`) but not from your PC or phone:
+the host's firewall blocks it. The app uses the host network, so the firewall filters it,
+unlike containers with published ports, which Docker opens itself. Open TCP 8780 (web UI,
+DLNA player) and UDP 1900 (DLNA discovery):
+
+```sh
+# firewalld (Fedora, Rocky, Debian with firewalld): zone of your LAN interface
+sudo firewall-cmd --permanent --zone=home --add-port=8780/tcp --add-port=1900/udp
+sudo firewall-cmd --reload
+# ufw (Ubuntu)
+sudo ufw allow 8780/tcp && sudo ufw allow 1900/udp
+```
+
 ## Home Assistant does not find the DLNA player
 
 - The app needs the host network (`network_mode: host`) for SSDP discovery.
