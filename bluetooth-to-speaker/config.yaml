@@ -11,7 +11,6 @@ arch:
 image: ghcr.io/rosenkolev/bluetooth-to-speaker
 init: false
 startup: services
-boot: auto
 # SSDP discovery of the DLNA player needs the host network.
 host_network: true
 # The host's Bluetooth service (BlueZ).
@@ -26,6 +25,3 @@ panel_icon: mdi:speaker-bluetooth
 panel_title: Speaker
 services:
   - mqtt:want
-watchdog: http://[HOST]:[PORT:8780]/api/state
-options: {}
-schema: {}
