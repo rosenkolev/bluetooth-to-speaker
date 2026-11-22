@@ -1,0 +1,5 @@
+# Home Assistant add-on repository: add https://github.com/rosenkolev/bluetooth-to-speaker
+# in Settings > Add-ons > Add-on store > Repositories.
+name: Bluetooth to Speaker
+url: https://github.com/rosenkolev/bluetooth-to-speaker
+maintainer: Rosen Kolev

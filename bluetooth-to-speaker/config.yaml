@@ -1,0 +1,31 @@
+# Home Assistant add-on. The version is set by the release workflow.
+name: Bluetooth to Speaker
+version: "0.1.0"
+slug: bluetooth_to_speaker
+description: Turn your Home Assistant host into a Bluetooth speaker, with DLNA playback and MQTT controls
+url: https://github.com/rosenkolev/bluetooth-to-speaker
+arch:
+  - aarch64
+  - amd64
+# Multi-arch image built by the Docker workflow
+image: ghcr.io/rosenkolev/bluetooth-to-speaker
+init: false
+startup: services
+boot: auto
+# SSDP discovery of the DLNA player needs the host network.
+host_network: true
+# The host's Bluetooth service (BlueZ).
+host_dbus: true
+devices:
+  - /dev/snd
+privileged:
+  - SYS_NICE
+ingress: true
+ingress_port: 8780
+panel_icon: mdi:speaker-bluetooth
+panel_title: Speaker
+services:
+  - mqtt:want
+watchdog: http://[HOST]:[PORT:8780]/api/state
+options: {}
+schema: {}

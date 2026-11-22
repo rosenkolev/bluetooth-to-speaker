@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bluetooth Speaker</title>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--fg:#1c1f24;--mute:#6b7280;--line:#e5e7eb;--acc:#2563eb;--ok:#16a34a;--warn:#d97706;--bad:#dc2626}
+@media (prefers-color-scheme:dark){:root{--bg:#111317;--card:#1b1e24;--fg:#e8eaed;--mute:#9aa0a6;--line:#2c3038;--acc:#60a5fa;--ok:#4ade80;--warn:#fbbf24;--bad:#f87171}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,sans-serif}
+main{max-width:640px;margin:0 auto;padding:16px}
+h1{font-size:22px;margin:4px 0 12px}h2{font-size:15px;margin:0 0 10px;color:var(--mute);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:12px}
+.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.grow{flex:1}
+.pill{font-size:12px;padding:2px 8px;border-radius:99px;border:1px solid var(--line);color:var(--mute)}
+.pill.ok{color:var(--ok);border-color:var(--ok)}.pill.warn{color:var(--warn);border-color:var(--warn)}.pill.bad{color:var(--bad);border-color:var(--bad)}
+button{font:inherit;padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
+button.primary{background:var(--acc);border-color:var(--acc);color:#fff}button:disabled{opacity:.5;cursor:default}
+input,select{font:inherit;padding:7px 9px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);width:100%}
+input[type=range]{padding:0}input[type=checkbox]{width:auto}
+label{display:block;margin:10px 0 4px;color:var(--mute);font-size:13px}
+.track{font-size:17px;font-weight:600}.sub{color:var(--mute);font-size:13px}
+ul{list-style:none;margin:0;padding:0}li{display:flex;align-items:center;gap:8px;padding:8px 0;border-top:1px solid var(--line)}li:first-child{border-top:0}
+.warnbox{color:var(--warn);font-size:14px;margin-top:8px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}@media(max-width:480px){.grid{grid-template-columns:1fr}}
+details summary{cursor:pointer;color:var(--mute)}
+</style>
+</head>
+<body>
+<main>
+  <div class="row"><h1 class="grow" id="name">Bluetooth Speaker</h1><span class="pill" id="bt">…</span></div>
+
+  <div class="card">
+    <h2>Now playing</h2>
+    <div class="track" id="title">Nothing playing</div>
+    <div class="sub" id="artist"></div>
+    <div class="sub" id="stream"></div>
+    <div class="row" style="margin-top:10px">
+      <button onclick="media('previous')" aria-label="Previous">⏮</button>
+      <button onclick="media('play')" aria-label="Play">▶</button>
+      <button onclick="media('pause')" aria-label="Pause">⏸</button>
+      <button onclick="media('next')" aria-label="Next">⏭</button>
+    </div>
+    <label for="vol">Volume <span id="volv"></span></label>
+    <input type="range" id="vol" min="0" max="100" oninput="volLabel()" onchange="setVol()">
+    <div class="warnbox" id="warn"></div>
+  </div>
+
+  <div class="card">
+    <div class="row"><h2 class="grow" style="margin:0">Play on</h2><button onclick="restoreVols()" title="Set every output to its default volume">Default volumes</button></div>
+    <ul id="outs" style="margin-top:8px"></ul>
+    <div class="sub">Each output's volume is added to the main volume above. Phones, Home Assistant and DLNA change the main volume.</div>
+  </div>
+
+  <div class="card">
+    <div class="row"><h2 class="grow" style="margin:0">Phones</h2><button class="primary" id="pairbtn" onclick="pair()">Pair new phone</button></div>
+    <div class="sub" id="pairinfo" style="margin-top:6px"></div>
+    <ul id="devices" style="margin-top:8px"></ul>
+  </div>
+
+  <div class="card">
+    <h2>Settings</h2>
+    <form id="cfg" onsubmit="save(event)">
+      <div class="grid">
+        <div><label for="c_name">Bluetooth name</label><input id="c_name" required maxlength="40"></div>
+        <div><label for="c_bitpool">Quality</label>
+          <select id="c_bitpool"><option value="35">Wi-Fi friendly (bitpool 35)</option><option value="45">Balanced (45)</option><option value="53">Max quality (53)</option></select></div>
+        <div><label for="c_latency">Buffer (ms)</label><input id="c_latency" type="number" min="40" max="1000" step="10"></div>
+        <div><label for="c_maxvol">Max volume</label><input id="c_maxvol" type="number" min="1" max="100"></div>
+        <div><label for="c_window">Pairing window (s)</label><input id="c_window" type="number" min="10" max="600"></div>
+      </div>
+      <label>Outputs — all checked outputs play at the same time. Delay lines up fast outputs with slow ones (TVs add 50–150 ms).</label>
+      <div style="overflow-x:auto"><table id="c_outs" style="width:100%;border-collapse:collapse;font-size:14px">
+        <thead><tr class="sub"><th style="text-align:left">On</th><th style="text-align:left">Name</th><th>Delay ms</th><th>Default volume</th><th>Volume control</th></tr></thead><tbody></tbody></table></div>
+      <label><input type="checkbox" id="c_restore"> Reset output volumes to their defaults when playback starts after 5 minutes of silence</label>
+      <label><input type="checkbox" id="c_multipoint"> Two phones connected at once (the one that plays last wins). Off: a newly connected phone replaces the old one.</label>
+      <label><input type="checkbox" id="c_reconnect"> Reconnect last phone at start</label>
+      <label><input type="checkbox" id="c_resume"> Resume phone after Home Assistant playback</label>
+      <label><input type="checkbox" id="c_dlna"> DLNA renderer (Home Assistant / Music Assistant playback)</label>
+      <details style="margin-top:10px"><summary>MQTT (Home Assistant entities)</summary>
+        <label><input type="checkbox" id="c_mqtt"> Enabled</label>
+        <div class="grid">
+          <div><label for="c_mhost">Broker host</label><input id="c_mhost"></div>
+          <div><label for="c_mport">Port</label><input id="c_mport" type="number"></div>
+          <div><label for="c_muser">Username</label><input id="c_muser" autocomplete="off"></div>
+          <div><label for="c_mpass">Password</label><input id="c_mpass" type="password" autocomplete="new-password"></div>
+        </div>
+      </details>
+      <div class="row" style="margin-top:14px"><button class="primary" type="submit">Save</button><span class="sub" id="saved"></span></div>
+    </form>
+  </div>
+
+  <div class="card"><details><summary>Diagnostics</summary><pre class="sub" id="diag" style="white-space:pre-wrap"></pre></details></div>
+</main>
+<script>
+let cfg=null, dragging=false;
+const $=id=>document.getElementById(id);
+const api=(p,o={})=>fetch('api/'+p,Object.assign({headers:{'Content-Type':'application/json'}},o));
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function volLabel(){$('volv').textContent=$('vol').value;dragging=true}
+async function setVol(){dragging=false;await api('volume',{method:'POST',body:JSON.stringify({volume:+$('vol').value})})}
+async function toggleOut(d,on){await api('outputs/enable',{method:'POST',body:JSON.stringify({device:d,enabled:on})});await loadCfg();refresh()}
+async function outVol(d,v){await api('outputs/volume',{method:'POST',body:JSON.stringify({device:d,volume:v})})}
+async function restoreVols(){await api('outputs/restore',{method:'POST'});await loadCfg();refresh()}
+async function media(a){await api('media/'+a,{method:'POST'})}
+async function pair(){await api($('pairbtn').dataset.open?'pair/cancel':'pair',{method:'POST'});refresh()}
+async function dev(a,act){if(act==='remove'&&!confirm('Forget this phone?'))return;await api('devices/'+a+'/'+act,{method:'POST'});setTimeout(refresh,500)}
+async function refresh(){
+  let s; try{s=await (await api('state')).json()}catch(e){$('bt').textContent='offline';$('bt').className='pill bad';return}
+  const st=s.status;
+  $('name').textContent=s.name;
+  const src=s.source==='bluetooth'?'Bluetooth':s.source==='network'?'Home Assistant':'Idle';
+  $('bt').textContent=!st.bluez_ok?'BlueZ not reachable':!st.adapter_ok?'No adapter':src;
+  $('bt').className='pill '+(!st.adapter_ok?'bad':s.source==='idle'?'':'ok');
+  if(s.source==='network'&&st.network){$('title').textContent=st.network.title||'Home Assistant';$('artist').textContent=st.network.uri}
+  else if(st.track&&st.track.title){$('title').textContent=st.track.title;$('artist').textContent=[st.track.artist,st.track.album].filter(Boolean).join(' — ')}
+  else{$('title').textContent='Nothing playing';$('artist').textContent=''}
+  $('stream').textContent=st.stream?`${st.stream.codec} · ${st.stream.sample_rate/1000} kHz · ${st.stream.channels} ch`+(st.stream.bitpool?` · bitpool ${st.stream.bitpool}`:''):'';
+  if(!dragging){$('vol').value=s.volume;$('volv').textContent=s.volume}
+  $('warn').textContent=(st.warnings||[]).join(' · ');
+  const open=s.pairing_secs_left>0;
+  $('pairbtn').textContent=open?'Stop pairing':'Pair new phone';$('pairbtn').dataset.open=open?'1':'';
+  $('pairinfo').textContent=open?`Visible as "${s.name}" for ${s.pairing_secs_left}s — pick it in your phone's Bluetooth settings.`:'Hidden. Paired phones can still connect.';
+  $('devices').innerHTML=st.devices.length?st.devices.map(d=>`<li><span class="grow">${esc(d.name||d.address)}<br><span class="sub">${esc(d.address)}</span></span>
+    ${d.connected&&s.source==='bluetooth'&&st.active_device===d.address?'<span class="pill ok">playing</span>':d.connected?`<span class="pill">connected</span><button onclick="dev('${d.address}','play')">Play from here</button>`:''}
+    ${d.connected?`<button onclick="dev('${d.address}','disconnect')">Disconnect</button>`:`<button onclick="dev('${d.address}','connect')">Connect</button>`}
+    <button onclick="dev('${d.address}','remove')" aria-label="Forget">✕</button></li>`).join(''):'<li class="sub">No paired phones yet.</li>';
+  if(cfg){const live={};(st.outputs||[]).forEach(o=>live[o.device]=o.state);
+    (s.outputs||[]).forEach((o,i)=>{const row=$('out'+i);if(!row||row.dataset.dev!==o.device)return;
+      const ls=o.enabled?(live[o.device]||''):'';const p=row.querySelector('.pill');
+      p.textContent=ls.split(':')[0];p.title=ls;p.className='pill '+(ls==='playing'?'ok':ls.startsWith('unavail')||ls.startsWith('error')?'bad':'');p.style.display=ls?'':'none';
+      row.querySelector('input[type=checkbox]').checked=o.enabled;
+      const sl=row.querySelector('input[type=range]');if(document.activeElement!==sl){sl.value=o.volume;row.querySelector('.v').textContent=o.volume}})}
+  $('diag').textContent=`adapter ${st.adapter_address||'-'}\npackets ${s.stats.packets}  decode errors ${s.stats.decode_errors}  underruns ${s.stats.underruns}`;
+}
+async function loadCfg(){
+  cfg=await (await api('config')).json();
+  const avail=await (await api('outputs')).json();
+  // "Play on": one row per configured output with an on/off box and a live volume slider.
+  $('outs').innerHTML=cfg.outputs.map((o,i)=>`<li id="out${i}" data-dev="${esc(o.device)}" style="flex-wrap:wrap">
+    <label style="margin:0;display:flex;gap:8px;align-items:center;color:var(--fg);font-size:15px;min-width:140px" class="grow">
+    <input type="checkbox" ${o.enabled?'checked':''} onchange="toggleOut(this.closest('li').dataset.dev,this.checked)">${esc(o.name)}</label>
+    <span class="pill" style="display:none"></span>
+    <input type="range" min="0" max="100" value="${o.volume}" style="flex:2;min-width:140px" aria-label="Volume ${esc(o.name)}"
+      oninput="this.parentNode.querySelector('.v').textContent=this.value" onchange="outVol(this.closest('li').dataset.dev,+this.value)">
+    <span class="v sub" style="width:28px;text-align:right">${o.volume}</span></li>`).join('');
+  // Settings table: configured outputs first, then devices found on the board.
+  const rows=cfg.outputs.map(o=>Object.assign({},o));
+  avail.forEach(a=>{if(!rows.some(r=>r.device===a.id))rows.push({device:a.id,name:a.name,enabled:false,delay_ms:0,volume:100,default_volume:100,mixer:''})});
+  const mix=d=>(avail.find(a=>a.id===d)||{mixers:[]}).mixers;
+  $('c_outs').tBodies[0].innerHTML=rows.map(r=>{const opts=[['','Software'],['auto','Hardware (auto)'],...mix(r.device).map(m=>[m,'Hardware: '+m])];
+    if(r.mixer&&!opts.some(o=>o[0]===r.mixer))opts.push([r.mixer,'Hardware: '+r.mixer]);
+    return `<tr data-dev="${esc(r.device)}" data-vol="${r.volume}">
+    <td><input type="checkbox" ${r.enabled?'checked':''}></td>
+    <td><input value="${esc(r.name)}" maxlength="40" title="${esc(r.device)}"></td>
+    <td><input type="number" min="0" max="2000" step="10" value="${r.delay_ms}" style="width:90px"></td>
+    <td><input type="number" min="0" max="100" value="${r.default_volume}" style="width:80px"></td>
+    <td><select>${opts.map(o=>`<option value="${esc(o[0])}" ${o[0]===r.mixer?'selected':''}>${esc(o[1])}</option>`).join('')}</select></td></tr>`}).join('');
+  $('c_restore').checked=cfg.restore_default_volumes;
+  $('c_name').value=cfg.name;$('c_bitpool').value=[35,45,53].includes(cfg.max_bitpool)?cfg.max_bitpool:35;
+  $('c_latency').value=cfg.latency_ms;$('c_maxvol').value=cfg.max_volume;$('c_window').value=cfg.pairing_window_secs;
+  $('c_multipoint').checked=cfg.multipoint;$('c_reconnect').checked=cfg.reconnect_on_start;$('c_resume').checked=cfg.resume_bluetooth;$('c_dlna').checked=cfg.dlna.enabled;
+  $('c_mqtt').checked=cfg.mqtt.enabled;$('c_mhost').value=cfg.mqtt.host;$('c_mport').value=cfg.mqtt.port;$('c_muser').value=cfg.mqtt.username;$('c_mpass').value=cfg.mqtt.password;
+}
+async function save(e){
+  e.preventDefault();
+  const outputs=[...$('c_outs').tBodies[0].rows].map(tr=>{const inp=tr.querySelectorAll('input');
+    return {device:tr.dataset.dev,enabled:inp[0].checked,name:inp[1].value,delay_ms:+inp[2].value,
+      volume:+tr.dataset.vol,default_volume:+inp[3].value,mixer:tr.querySelector('select').value}})
+    .filter(o=>o.enabled||cfg.outputs.some(c=>c.device===o.device));
+  cfg.restore_default_volumes=$('c_restore').checked;
+  Object.assign(cfg,{name:$('c_name').value,outputs,max_bitpool:+$('c_bitpool').value,latency_ms:+$('c_latency').value,
+    max_volume:+$('c_maxvol').value,pairing_window_secs:+$('c_window').value,multipoint:$('c_multipoint').checked,reconnect_on_start:$('c_reconnect').checked,
+    resume_bluetooth:$('c_resume').checked,volume:+$('vol').value});
+  cfg.dlna.enabled=$('c_dlna').checked;
+  Object.assign(cfg.mqtt,{enabled:$('c_mqtt').checked,host:$('c_mhost').value,port:+$('c_mport').value,username:$('c_muser').value,password:$('c_mpass').value});
+  const r=await (await api('config',{method:'PUT',body:JSON.stringify(cfg)})).json();
+  $('saved').textContent=r.restart_needed?'Saved. Restart the app to apply all changes.':'Saved.';
+  setTimeout(()=>$('saved').textContent='',5000);await loadCfg();refresh();
+}
+loadCfg();refresh();setInterval(refresh,1500);
+</script>
+</body>
+</html>

@@ -1,0 +1,48 @@
+name: Bug report
+description: Something does not work as described
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Shown in the log on start-up, or the image tag.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Installed with
+      options:
+        - Docker / Compose
+        - Home Assistant add-on
+        - CasaOS
+        - Runtipi
+        - Docker Apps (Home Assistant)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: board
+    attributes:
+      label: Board and Bluetooth adapter
+      placeholder: "Raspberry Pi 4, built-in Bluetooth / Radxa ROCK 5B+, RTL8852BE"
+  - type: input
+    id: phone
+    attributes:
+      label: Phone or source
+      placeholder: "iPhone 15, iOS 19 / Pixel 8 / Home Assistant TTS"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: "`docker logs bluetooth-to-speaker`, around the problem."
+      render: text

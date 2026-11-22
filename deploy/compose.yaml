@@ -1,0 +1,29 @@
+# Bluetooth to Speaker: plain Docker Compose (Portainer, Dockge, docker compose up -d).
+services:
+  bluetooth-to-speaker:
+    image: ghcr.io/rosenkolev/bluetooth-to-speaker:latest
+    container_name: bluetooth-to-speaker
+    restart: unless-stopped
+    # Host network: Home Assistant and Music Assistant find the DLNA player (SSDP multicast).
+    network_mode: host
+    devices:
+      - /dev/snd:/dev/snd # sound cards
+    volumes:
+      - /run/dbus:/run/dbus:ro # the host's Bluetooth service (BlueZ)
+      - ./data:/data # settings and paired-phone memory
+    # Least privilege: no capabilities except real-time priority for the audio threads.
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_NICE
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      BT_NAME: "Bluetooth Speaker"
+      # Outputs separated by ";" (or pick them in the web UI):
+      # BT_OUTPUT: "plughw:CARD=rockchipes8316,DEV=0;plughw:CARD=rockchiphdmi0,DEV=0"
+      # MQTT_HOST: "192.168.1.10"
+      # MQTT_USERNAME: ""
+      # MQTT_PASSWORD: ""
+      RUST_LOG: info

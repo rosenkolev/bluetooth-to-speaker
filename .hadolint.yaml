@@ -1,0 +1,6 @@
+ignored:
+  # Alpine packages follow the pinned Alpine release (ARG ALPINE); exact package
+  # versions disappear from the mirrors and would break rebuilds.
+  - DL3018
+  # The health check uses the shell to read HTTP_PORT.
+  - DL3025
