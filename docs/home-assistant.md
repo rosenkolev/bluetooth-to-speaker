@@ -73,7 +73,7 @@ address (`127.0.0.1` when Mosquitto runs on the same host), port `1883` and the 
 
 - **Home Assistant add-on:** nothing to do. With the Mosquitto add-on running, the speaker
   connects by itself.
-- **Docker, CasaOS, Runtipi:** in the speaker's web UI, open **Settings > MQTT**, turn on
+- **Docker, CasaOS:** in the speaker's web UI, open **Settings > MQTT**, turn on
   **Enabled**, enter the broker host (the IP of the machine running Mosquitto), port `1883`,
   user and password, then **Save** and restart the container. Or set `MQTT_HOST`,
   `MQTT_USERNAME` and `MQTT_PASSWORD` in the compose file.

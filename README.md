@@ -58,9 +58,12 @@ A commented version is in [deploy/compose.yaml](deploy/compose.yaml).
 Or add `https://github.com/rosenkolev/bluetooth-to-speaker` in
 **Settings > Add-ons > Add-on store > ⋮ > Repositories**, then install **Bluetooth to Speaker**.
 
-### CasaOS, Runtipi, Docker Apps
+### CasaOS, Docker Apps
 
-Coming in the app store [rosenkolev/app-store](https://github.com/rosenkolev/app-store).
+In the app store [rosenkolev/app-store](https://github.com/rosenkolev/app-store):
+
+- **CasaOS:** **App Store > More apps > Add source**, `https://github.com/rosenkolev/app-store/archive/refs/heads/main.zip`
+- **Docker Apps** (Home Assistant): add the app store repository `https://github.com/rosenkolev/app-store`, format CasaOS
 
 ## Before you start
 
