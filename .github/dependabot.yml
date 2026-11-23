@@ -7,8 +7,10 @@ updates:
     groups:
       cargo:
         patterns: ["*"]
-        update-types: [minor, patch]
+        update-types: [patch]
     ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-minor"]
       # symphonia 0.6 rewrote its decoding API; it needs its own port and a playback test.
       - dependency-name: symphonia
         versions: [">=0.6"]
@@ -16,7 +18,13 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-minor"]
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-minor"]

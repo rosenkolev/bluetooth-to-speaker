@@ -22,5 +22,8 @@ jobs:
       # Drafts the next release notes as pull requests are merged into "main".
       # Publishing the draft creates the tag, which builds and publishes the release images.
       - uses: release-drafter/release-drafter@v7
+        with:
+          # Pull requests only label and preview; the draft is updated from main.
+          dry-run: ${{ github.event_name == 'pull_request' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

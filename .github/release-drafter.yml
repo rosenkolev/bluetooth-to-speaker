@@ -3,30 +3,30 @@ tag-template: "v$RESOLVED_VERSION"
 change-template: "- #$NUMBER - $TITLE (@$AUTHOR)"
 categories:
   - title: "⚠ Breaking Changes"
-    labels:
-      - "breaking-change"
+    semver-increment: major
+    when:
+      label: "breaking-change"
   - title: "✨ Features"
-    labels:
-      - "feature"
-      - "enhancement"
+    semver-increment: minor
+    when:
+      labels:
+        - "feature"
+        - "enhancement"
   - title: "🐛 Fixes"
-    labels:
-      - "bug"
-      - "fix"
+    when:
+      labels:
+        - "bug"
+        - "fix"
   - title: "⬆️ Dependencies"
     collapse-after: 1
-    labels:
-      - "dependencies"
-version-resolver:
-  major:
-    labels: ["breaking-change"]
-  minor:
-    labels: ["feature", "enhancement"]
-  default: patch
+    when:
+      label: "dependencies"
+  - type: "version-resolver"
+    semver-increment: patch
 autolabeler:
-  - label: "dependencies"
+  - labels: ["dependencies"]
     files: ["Cargo.lock"]
-  - label: "documentation"
+  - labels: ["documentation"]
     files: ["*.md", "docs/**"]
 template: |
   ## What’s Changed
