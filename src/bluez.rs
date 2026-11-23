@@ -3,6 +3,7 @@
 //! Uses only a unique bus name (no well-known name), so no host D-Bus policy file is needed.
 
 use crate::app::{App, BtCmd, DeviceInfo, Source};
+use crate::checks::{Level, Problem};
 use crate::player::{run_bt_stream, Lease};
 use futures_util::StreamExt;
 use std::collections::HashMap;
@@ -158,10 +159,43 @@ impl Agent {
 
 pub async fn run(app: Arc<App>, mut rx: mpsc::UnboundedReceiver<BtCmd>) {
     let mut first = true;
+    let mut last_error = String::new();
     loop {
         match session(&app, &mut rx, first).await {
-            Ok(()) => log::warn!("bluez went away, reconnecting"),
-            Err(e) => log::warn!("bluez session error: {e}"),
+            Ok(()) => {
+                log::warn!("bluez went away, reconnecting");
+                last_error.clear();
+                app.check_now.notify_one(); // explain what is wrong right away
+            }
+            Err(e) => {
+                if is_access_denied(&e) {
+                    app.set_problem(
+                        Problem::new(
+                            "bluez_denied",
+                            Level::Error,
+                            "BlueZ refuses this app",
+                            format!(
+                                "The host's D-Bus policy does not let user {} use Bluetooth.",
+                                unsafe { libc::geteuid() }
+                            ),
+                        )
+                        .fix(&[
+                            "echo '<busconfig><policy user=\"1000\"><allow send_destination=\"org.bluez\"/></policy></busconfig>' | sudo tee /etc/dbus-1/system.d/bluetooth-to-speaker.conf",
+                            "sudo systemctl reload dbus",
+                        ])
+                        .help("runs-as-root"),
+                    );
+                }
+                // The checks explain a missing BlueZ; repeat the same error only in the debug log.
+                let text = e.to_string();
+                if text != last_error {
+                    log::warn!("bluez session error: {text}");
+                    last_error = text;
+                    app.check_now.notify_one();
+                } else {
+                    log::debug!("bluez session error: {text}");
+                }
+            }
         }
         first = false;
         app.update_status(|s| {
@@ -196,6 +230,8 @@ struct Session<'a> {
     switched_away: HashMap<String, std::time::Instant>,
     /// Addresses of paired devices.
     known: std::collections::HashSet<String>,
+    /// A2DP sink transports that just appeared, to tell ours from another program's.
+    new_transports: Vec<(String, std::time::Instant)>,
 }
 
 async fn session(app: &Arc<App>, rx: &mut mpsc::UnboundedReceiver<BtCmd>, first: bool) -> zbus::Result<()> {
@@ -214,11 +250,39 @@ async fn session(app: &Arc<App>, rx: &mut mpsc::UnboundedReceiver<BtCmd>, first:
     let mut owner_signals = MessageStream::for_match_rule(rule, &conn, NonZeroUsize::new(16)).await?;
 
     let objects = managed_objects(&conn).await?;
+    app.clear_problem("bluez_denied");
+    app.clear_problem("bluez");
     if !objects.iter().any(|(p, i)| p.as_str() == adapter && i.contains_key(IF_ADAPTER)) {
+        let others: Vec<String> = objects
+            .iter()
+            .filter(|(_, i)| i.contains_key(IF_ADAPTER))
+            .filter_map(|(p, _)| p.as_str().rsplit('/').next().map(str::to_string))
+            .collect();
+        let p = if others.is_empty() {
+            Problem::new(
+                "adapter",
+                Level::Error,
+                "No Bluetooth adapter",
+                "BlueZ runs, but the host has no Bluetooth adapter, or it is switched off by rfkill.",
+            )
+            .fix(&[
+                "rfkill list bluetooth   # \"Soft blocked: yes\"?",
+                "sudo rfkill unblock bluetooth",
+                "# no adapter at all: plug in a USB Bluetooth adapter",
+            ])
+        } else {
+            Problem::new(
+                "adapter",
+                Level::Error,
+                format!("Bluetooth adapter {} not found", cfg.adapter),
+                format!("The host has {}.", others.join(", ")),
+            )
+            .fix_owned(vec![format!("# set BT_ADAPTER={} (or \"adapter\" in config.json)", others[0])])
+        };
+        app.set_problem(p.help("bluez-not-reachable-or-no-adapter"));
         app.update_status(|s| {
             s.bluez_ok = true;
             s.adapter_ok = false;
-            s.warnings = vec![format!("Bluetooth adapter {} not found", cfg.adapter)];
         });
         return Err(zbus::Error::Failure(format!("adapter {adapter} not found")));
     }
@@ -226,8 +290,25 @@ async fn session(app: &Arc<App>, rx: &mut mpsc::UnboundedReceiver<BtCmd>, first:
     // Adapter: powered, hidden, named.
     let powered = get_prop(&conn, &adapter, IF_ADAPTER, "Powered").await.ok().and_then(|v| v_bool(&v));
     if powered == Some(false) {
-        set_prop(&conn, &adapter, IF_ADAPTER, "Powered", Variant::Bool(true)).await?;
+        if let Err(e) = set_prop(&conn, &adapter, IF_ADAPTER, "Powered", Variant::Bool(true)).await {
+            app.set_problem(
+                Problem::new(
+                    "adapter",
+                    Level::Error,
+                    "The Bluetooth adapter cannot be switched on",
+                    format!("{e}. It is usually blocked by rfkill."),
+                )
+                .fix(&["sudo rfkill unblock bluetooth", "bluetoothctl power on"])
+                .help("bluez-not-reachable-or-no-adapter"),
+            );
+            app.update_status(|s| {
+                s.bluez_ok = true;
+                s.adapter_ok = false;
+            });
+            return Err(e);
+        }
     }
+    app.clear_problem("adapter");
     set_prop(&conn, &adapter, IF_ADAPTER, "Alias", Variant::from(cfg.name.as_str())).await?;
     set_prop(&conn, &adapter, IF_ADAPTER, "Discoverable", Variant::Bool(false)).await?;
     set_prop(&conn, &adapter, IF_ADAPTER, "Pairable", Variant::Bool(false)).await?;
@@ -258,7 +339,6 @@ async fn session(app: &Arc<App>, rx: &mut mpsc::UnboundedReceiver<BtCmd>, first:
         s.bluez_ok = true;
         s.adapter_ok = true;
         s.adapter_address = address;
-        s.warnings.clear();
     });
 
     let mut sess = Session {
@@ -270,6 +350,7 @@ async fn session(app: &Arc<App>, rx: &mut mpsc::UnboundedReceiver<BtCmd>, first:
         connected: Vec::new(),
         switched_away: HashMap::new(),
         known: Default::default(),
+        new_transports: Vec::new(),
     };
     sess.refresh_devices().await;
     sess.connected =
@@ -410,9 +491,17 @@ impl Session<'_> {
                     }
                     IF_ADAPTER => {
                         if changed.get("Powered").and_then(v_bool) == Some(false) {
-                            self.app.update_status(|s| s.warnings = vec!["Bluetooth adapter powered off".into()]);
+                            self.app.set_problem(
+                                Problem::new(
+                                    "adapter",
+                                    Level::Error,
+                                    "Bluetooth is switched off",
+                                    "Something on the host switched the Bluetooth adapter off.",
+                                )
+                                .fix(&["bluetoothctl power on", "# or restart this app"]),
+                            );
                         } else if changed.get("Powered").and_then(v_bool) == Some(true) {
-                            self.app.update_status(|s| s.warnings.clear());
+                            self.app.clear_problem("adapter");
                         }
                     }
                     _ => {}
@@ -422,6 +511,13 @@ impl Session<'_> {
             "InterfacesAdded" => {
                 type Added = (OwnedObjectPath, HashMap<String, HashMap<String, OwnedVariant>>);
                 let Ok((obj, ifaces)) = msg.body().deserialize::<Added>() else { return };
+                // An A2DP sink stream. Ours gets SetConfiguration right after; if not, another
+                // program on the host took it (checked in on_tick).
+                if ifaces.get(IF_TRANSPORT).and_then(|t| t.get("UUID")).and_then(v_str).as_deref()
+                    == Some(A2DP_SINK_UUID)
+                {
+                    self.new_transports.push((obj.to_string(), std::time::Instant::now()));
+                }
                 let paired = ifaces.get(IF_DEVICE).and_then(|d| d.get("Paired")).and_then(v_bool).unwrap_or(false);
                 if paired || self.known.contains(&addr_of(obj.as_str())) {
                     self.refresh_devices().await;
@@ -441,6 +537,7 @@ impl Session<'_> {
         match ev {
             EpEvent::SetConfiguration { transport, device } => {
                 log::info!("transport configured: {transport}");
+                self.app.clear_problem("other_sink_stream");
                 self.transports.insert(transport.clone(), Transport { device, stop: None });
                 // The state may already be pending.
                 if let Ok(v) = get_prop(&self.conn, &transport, IF_TRANSPORT, "State").await {
@@ -689,6 +786,31 @@ impl Session<'_> {
     }
 
     async fn on_tick(&mut self) {
+        let now = std::time::Instant::now();
+        let (due, waiting): (Vec<_>, Vec<_>) =
+            self.new_transports.drain(..).partition(|(_, t)| now.duration_since(*t) >= Duration::from_secs(3));
+        self.new_transports = waiting;
+        for (path, _) in due {
+            if self.transports.contains_key(&path) {
+                continue;
+            }
+            let addr = addr_of(&path);
+            let name = self
+                .app
+                .status
+                .lock()
+                .unwrap()
+                .devices
+                .iter()
+                .find(|d| d.address == addr)
+                .map(|d| d.name.clone())
+                .unwrap_or(addr);
+            self.app.set_problem(crate::checks::other_sink(
+                "other_sink_stream",
+                &name,
+                "another program (PipeWire, PulseAudio or bluez-alsa)",
+            ));
+        }
         if self.pairing_was_open {
             if self.app.pairing_open() {
                 self.app.notify(); // countdown in the UI
@@ -710,15 +832,23 @@ fn spawn_stream(app: Arc<App>, fd: std::os::fd::OwnedFd, mtu: usize, lease: Leas
 }
 
 /// Real-time priority for the audio thread when CAP_SYS_NICE is granted; otherwise nice -10 or nothing.
+/// Real-time also needs a real-time CPU budget for the container: hosts with cgroup v2 and
+/// real-time group scheduling give containers none, so nice -10 is the usual result there.
 pub fn raise_priority() {
-    unsafe {
+    static REPORTED: std::sync::Once = std::sync::Once::new();
+    let got = unsafe {
         // Zeroed: musl's sched_param has extra fields.
         let mut param: libc::sched_param = std::mem::zeroed();
         param.sched_priority = 20;
-        if libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param) != 0 {
-            libc::setpriority(libc::PRIO_PROCESS, 0, -10);
+        if libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param) == 0 {
+            "real-time (SCHED_FIFO 20)"
+        } else if libc::setpriority(libc::PRIO_PROCESS, 0, -10) == 0 {
+            "high (nice -10; the host does not give containers real-time time)"
+        } else {
+            "normal (no SYS_NICE capability)"
         }
-    }
+    };
+    REPORTED.call_once(|| log::info!("audio thread priority: {got}"));
 }
 
 // ---------------------------------------------------------------- D-Bus helpers
@@ -752,6 +882,10 @@ async fn set_prop(conn: &Connection, path: &str, iface: &str, name: &str, value:
 async fn managed_objects(conn: &Connection) -> zbus::Result<ManagedObjects> {
     let reply = call(conn, "/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects", &()).await?;
     reply.body().deserialize::<ManagedObjects>()
+}
+
+fn is_access_denied(e: &zbus::Error) -> bool {
+    matches!(e, zbus::Error::MethodError(name, _, _) if name.as_str() == "org.freedesktop.DBus.Error.AccessDenied")
 }
 
 fn v_bool(v: &OwnedVariant) -> Option<bool> {

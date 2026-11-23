@@ -40,14 +40,19 @@ Environment variables override them at start-up.
 
 ## Environment variables
 
+`BT_NAME` and `BT_OUTPUT` are starting values: they apply on the first start only, then the
+web UI owns these settings. The other variables apply on every start.
+
 | Variable | Description |
 | - | - |
-| `BT_NAME` | Bluetooth name |
+| `BT_NAME` | Bluetooth name (first start) |
+| `BT_OUTPUT` | Outputs, separated by `;` (device names contain commas) (first start) |
 | `BT_ADAPTER` | Bluetooth adapter |
-| `BT_OUTPUT` | Outputs, separated by `;` (device names contain commas) |
 | `HTTP_PORT` | Web UI port |
 | `MQTT_HOST` | MQTT broker; setting it turns MQTT on |
 | `MQTT_PORT`, `MQTT_USERNAME`, `MQTT_PASSWORD` | MQTT settings |
 | `ADVERTISE_IP` | IP address announced to DLNA controllers, when the automatic choice is wrong |
 | `DATA_DIR` | Settings folder (default `/data`) |
+| `PUID`, `PGID` | User and group the app runs as (default: the data folder's owner, else 1000) |
+| `RUN_AS_ROOT` | `1`: stay root (see [Runs as root](troubleshooting.md#runs-as-root)) |
 | `RUST_LOG` | Log level: `error`, `warn`, `info` (default) or `debug` |

@@ -43,12 +43,14 @@ services:
       - /run/dbus:/run/dbus:ro
       - ./data:/data
     cap_drop: [ALL]
-    cap_add: [SYS_NICE]
+    cap_add: [CHOWN, SETUID, SETGID, SYS_NICE] # starts as root, then runs as user 1000
     read_only: true
 ```
 
-Then open `http://<host>:8780` and press **Pair new phone**. With a host firewall
-(firewalld, ufw), open TCP 8780 and UDP 1900 first: see [troubleshooting](docs/troubleshooting.md#the-web-ui-does-not-open-from-other-devices).
+Then open `http://<host>:8780` and press **Pair new phone**. If something on the host is
+missing (BlueZ, a firewall rule, another Bluetooth receiver), the web UI says what and shows
+the command that fixes it. With a host firewall (firewalld, ufw), open TCP 8780 and UDP 1900:
+see [troubleshooting](docs/troubleshooting.md#the-web-ui-does-not-open-from-other-devices).
 A commented version is in [deploy/compose.yaml](deploy/compose.yaml).
 
 ### Home Assistant add-on

@@ -150,6 +150,25 @@ All entities belong to one device, named after the speaker.
 | `sensor` Now playing | Artist and title |
 | `button` Play, Pause, Next track, Previous track | Control the phone |
 | `button` Disconnect phone | Disconnects the phone that plays |
+| `binary_sensor` Setup problem | On when the setup needs a fix; the `problems` attribute lists them |
+| `sensor` Setup problem details | The first problem, or `none`; the web UI shows the fix |
+
+Notify when the speaker needs attention:
+
+```yaml
+automation:
+  - alias: Speaker needs setup
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.bluetooth_speaker_setup_problem
+        to: "on"
+        for: "00:02:00"
+    actions:
+      - action: persistent_notification.create
+        data:
+          title: Bluetooth speaker
+          message: "{{ states('sensor.bluetooth_speaker_setup_problem_details') }}. Open the speaker's web UI for the fix."
+```
 
 ## Examples
 

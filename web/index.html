@@ -21,7 +21,10 @@ input[type=range]{padding:0}input[type=checkbox]{width:auto}
 label{display:block;margin:10px 0 4px;color:var(--mute);font-size:13px}
 .track{font-size:17px;font-weight:600}.sub{color:var(--mute);font-size:13px}
 ul{list-style:none;margin:0;padding:0}li{display:flex;align-items:center;gap:8px;padding:8px 0;border-top:1px solid var(--line)}li:first-child{border-top:0}
-.warnbox{color:var(--warn);font-size:14px;margin-top:8px}
+.prob{border-top:1px solid var(--line);padding:10px 0}.prob:first-child{border-top:0}
+.prob b{display:block}.prob.error b{color:var(--bad)}.prob.warning b{color:var(--warn)}
+.prob pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:8px 0 4px;white-space:pre-wrap;word-break:break-all;font-size:13px}
+.prob a{color:var(--acc);font-size:13px}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}@media(max-width:480px){.grid{grid-template-columns:1fr}}
 details summary{cursor:pointer;color:var(--mute)}
 </style>
@@ -29,6 +32,11 @@ details summary{cursor:pointer;color:var(--mute)}
 <body>
 <main>
   <div class="row"><h1 class="grow" id="name">Bluetooth Speaker</h1><span class="pill" id="bt">…</span></div>
+
+  <div class="card" id="problems" hidden>
+    <div class="row"><h2 class="grow" style="margin:0">Setup</h2><button onclick="checkAgain()" id="checkbtn">Check again</button></div>
+    <div id="plist"></div>
+  </div>
 
   <div class="card">
     <h2>Now playing</h2>
@@ -43,7 +51,6 @@ details summary{cursor:pointer;color:var(--mute)}
     </div>
     <label for="vol">Volume <span id="volv"></span></label>
     <input type="range" id="vol" min="0" max="100" oninput="volLabel()" onchange="setVol()">
-    <div class="warnbox" id="warn"></div>
   </div>
 
   <div class="card">
@@ -105,19 +112,30 @@ async function restoreVols(){await api('outputs/restore',{method:'POST'});await 
 async function media(a){await api('media/'+a,{method:'POST'})}
 async function pair(){await api($('pairbtn').dataset.open?'pair/cancel':'pair',{method:'POST'});refresh()}
 async function dev(a,act){if(act==='remove'&&!confirm('Forget this phone?'))return;await api('devices/'+a+'/'+act,{method:'POST'});setTimeout(refresh,500)}
+async function checkAgain(){$('checkbtn').disabled=true;await api('checks',{method:'POST'});setTimeout(()=>{$('checkbtn').disabled=false;refresh()},2500)}
+async function copyFix(btn){const t=btn.previousElementSibling.textContent;try{await navigator.clipboard.writeText(t);btn.textContent='Copied'}catch(e){btn.textContent='Select and copy'}setTimeout(()=>btn.textContent='Copy',2000)}
+let lastProblems='';
+function showProblems(list){
+  const key=JSON.stringify(list);if(key===lastProblems)return;lastProblems=key;
+  $('problems').hidden=!list.length;
+  $('plist').innerHTML=list.map(p=>`<div class="prob ${p.level}"><b>${esc(p.title)}</b><div class="sub">${esc(p.detail)}</div>
+    ${p.fix.length?`<pre>${esc(p.fix.join('\n'))}</pre><button onclick="copyFix(this)">Copy</button>`:''}
+    ${p.help?` <a href="${esc(p.help)}" target="_blank" rel="noopener">More help</a>`:''}</div>`).join('');
+}
 async function refresh(){
   let s; try{s=await (await api('state')).json()}catch(e){$('bt').textContent='offline';$('bt').className='pill bad';return}
   const st=s.status;
   $('name').textContent=s.name;
   const src=s.source==='bluetooth'?'Bluetooth':s.source==='network'?'Home Assistant':'Idle';
-  $('bt').textContent=!st.bluez_ok?'BlueZ not reachable':!st.adapter_ok?'No adapter':src;
-  $('bt').className='pill '+(!st.adapter_ok?'bad':s.source==='idle'?'':'ok');
+  const errors=(s.problems||[]).filter(p=>p.level==='error').length;
+  $('bt').textContent=!st.bluez_ok?'BlueZ not reachable':!st.adapter_ok?'No adapter':errors?'Needs setup':src;
+  $('bt').className='pill '+(!st.adapter_ok||errors?'bad':s.source==='idle'?'':'ok');
   if(s.source==='network'&&st.network){$('title').textContent=st.network.title||'Home Assistant';$('artist').textContent=st.network.uri}
   else if(st.track&&st.track.title){$('title').textContent=st.track.title;$('artist').textContent=[st.track.artist,st.track.album].filter(Boolean).join(' — ')}
   else{$('title').textContent='Nothing playing';$('artist').textContent=''}
   $('stream').textContent=st.stream?`${st.stream.codec} · ${st.stream.sample_rate/1000} kHz · ${st.stream.channels} ch`+(st.stream.bitpool?` · bitpool ${st.stream.bitpool}`:''):'';
   if(!dragging){$('vol').value=s.volume;$('volv').textContent=s.volume}
-  $('warn').textContent=(st.warnings||[]).join(' · ');
+  showProblems(s.problems||[]);
   const open=s.pairing_secs_left>0;
   $('pairbtn').textContent=open?'Stop pairing':'Pair new phone';$('pairbtn').dataset.open=open?'1':'';
   $('pairinfo').textContent=open?`Visible as "${s.name}" for ${s.pairing_secs_left}s — pick it in your phone's Bluetooth settings.`:'Hidden. Paired phones can still connect.';

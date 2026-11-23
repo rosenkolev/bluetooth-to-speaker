@@ -1,6 +1,7 @@
 //! MQTT with Home Assistant discovery.
 
 use crate::app::{App, BtCmd};
+use crate::checks::{Level, Problem};
 use rumqttc::{AsyncClient, Event, LastWill, MqttOptions, Packet, QoS};
 use serde_json::json;
 use std::sync::Arc;
@@ -67,6 +68,7 @@ pub async fn run(app: Arc<App>) {
         match events.poll().await {
             Ok(Event::Incoming(Packet::ConnAck(_))) => {
                 log::info!("mqtt connected to {}:{}", cfg.mqtt.host, cfg.mqtt.port);
+                app.clear_problem("mqtt");
                 // In its own task: publishing waits for room in the client queue, which only
                 // this loop empties. Awaiting it here could block the loop on itself.
                 let (app, client) = (app.clone(), client.clone());
@@ -128,7 +130,31 @@ pub async fn run(app: Arc<App>) {
             }
             Ok(_) => {}
             Err(e) => {
-                log::warn!("mqtt: {e}");
+                log::debug!("mqtt: {e}");
+                let auth = matches!(
+                    &e,
+                    rumqttc::ConnectionError::ConnectionRefused(
+                        rumqttc::ConnectReturnCode::BadUserNamePassword | rumqttc::ConnectReturnCode::NotAuthorized
+                    )
+                );
+                let (title, fix) = if auth {
+                    ("MQTT broker refuses the login", "# web UI: Settings > MQTT: check the username and password")
+                } else {
+                    ("Cannot reach the MQTT broker", "# web UI: Settings > MQTT: check the broker host and port")
+                };
+                app.set_problem(
+                    Problem::new(
+                        "mqtt",
+                        Level::Warning,
+                        title,
+                        format!(
+                            "{}:{}: {e}. Home Assistant controls (MQTT) do not work; DLNA playback does.",
+                            cfg.mqtt.host, cfg.mqtt.port
+                        ),
+                    )
+                    .fix(&[fix])
+                    .help("home-assistant-entities-are-missing"),
+                );
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
@@ -186,7 +212,12 @@ fn state_json(app: &App) -> String {
         app.cfg().outputs.iter().map(|o| (output_id(&o.device), json!(if o.enabled { "ON" } else { "OFF" }))).collect();
     let output_volumes: serde_json::Map<String, serde_json::Value> =
         app.cfg().outputs.iter().map(|o| (output_id(&o.device), json!(o.volume))).collect();
+    // Problems that need the user (info-level hints stay in the web UI).
+    let problems: Vec<String> =
+        app.problems().into_iter().filter(|p| p.level != Level::Info).map(|p| p.title).collect();
     json!({
+        "problem": problems.first().cloned().unwrap_or_else(|| "none".into()),
+        "problems": problems,
         "volume": app.volume(),
         "source": app.output.current(),
         "phone": phone,
@@ -249,6 +280,23 @@ async fn publish_discovery(app: &App, client: &AsyncClient, prefix: &str, node: 
         e["icon"] = json!(icon);
         entities.push(("sensor", id, e));
     }
+
+    // Setup problems: on when something needs the user; the text says what (details in the web UI).
+    let mut e = common("problem", "Setup problem");
+    e["state_topic"] = json!(state);
+    e["value_template"] = json!("{{ 'ON' if value_json.problems | length > 0 else 'OFF' }}");
+    e["json_attributes_topic"] = json!(state);
+    e["json_attributes_template"] = json!("{{ {'problems': value_json.problems} | tojson }}");
+    e["device_class"] = json!("problem");
+    e["entity_category"] = json!("diagnostic");
+    entities.push(("binary_sensor", "problem", e));
+
+    let mut e = common("problem_text", "Setup problem details");
+    e["state_topic"] = json!(state);
+    e["value_template"] = json!("{{ value_json.problem }}");
+    e["icon"] = json!("mdi:alert-circle-outline");
+    e["entity_category"] = json!("diagnostic");
+    entities.push(("sensor", "problem_text", e));
 
     let mut e = common("pairing", "Pairing");
     e["state_topic"] = json!(state);

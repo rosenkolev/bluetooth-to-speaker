@@ -6,6 +6,7 @@ pub const VERSION: &str = match option_env!("APP_VERSION") {
 
 mod app;
 mod bluez;
+mod checks;
 mod config;
 mod dlna;
 mod group;
@@ -13,6 +14,7 @@ mod mqtt;
 mod net;
 mod output;
 mod player;
+mod privilege;
 mod sbc;
 mod ssdp;
 mod web;
@@ -26,11 +28,14 @@ fn main() {
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
         log::error!("cannot create data dir {}: {e}", data_dir.display());
     }
+    // Before any thread starts: become a normal user when that is safe. Then read the
+    // settings as that user (the files are now theirs).
+    let privilege = privilege::drop_root(&data_dir, config::Config::peek_http_port(&data_dir));
     let cfg = config::Config::load(&data_dir);
     cfg.save(&data_dir);
     log::info!("bluetooth-to-speaker {} starting as \"{}\"", crate::VERSION, cfg.name);
 
-    let (app, bt_rx) = app::App::new(data_dir, cfg.clone());
+    let (app, bt_rx) = app::App::new(data_dir, cfg.clone(), privilege);
     app.restore_default_volumes();
 
     // One thread for all control work; audio runs on its own threads.
@@ -40,6 +45,7 @@ fn main() {
         tokio::spawn(bluez::run(app.clone(), bt_rx));
         tokio::spawn(web::run(app.clone()));
         tokio::spawn(mqtt::run(app.clone()));
+        tokio::spawn(checks::run(app.clone()));
         if cfg.dlna.enabled {
             tokio::spawn(ssdp::run(app.clone()));
         }

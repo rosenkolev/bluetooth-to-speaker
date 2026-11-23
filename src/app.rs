@@ -1,3 +1,4 @@
+use crate::checks::{Level, Problem};
 use crate::config::Config;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -64,7 +65,6 @@ pub struct Status {
     pub network: Option<NetworkPlayback>,
     /// Live state of each output while a stream plays.
     pub outputs: Vec<OutputStatus>,
-    pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -116,6 +116,15 @@ pub struct App {
     /// Settings changed and not yet written (see `save_config`).
     config_dirty: AtomicBool,
     save_requested: tokio::sync::Notify,
+    /// User the app runs as (see `privilege`).
+    pub privilege: crate::privilege::Privilege,
+    /// Setup problems, most severe first (see `checks`).
+    problems: Mutex<Vec<Problem>>,
+    /// Run the setup checks now.
+    pub check_now: tokio::sync::Notify,
+    /// Outputs kept open (playing silence) between streams, with their parking number.
+    parked: Mutex<Option<(u64, crate::group::OutputGroup)>>,
+    park_seq: AtomicU64,
 }
 
 /// Main volume 0..100 to the AVRCP absolute volume 0..127, and back. Rounded so that
@@ -129,7 +138,11 @@ pub fn from_avrcp(v: u16) -> u8 {
 }
 
 impl App {
-    pub fn new(data_dir: PathBuf, cfg: Config) -> (Arc<App>, mpsc::UnboundedReceiver<BtCmd>) {
+    pub fn new(
+        data_dir: PathBuf,
+        cfg: Config,
+        privilege: crate::privilege::Privilege,
+    ) -> (Arc<App>, mpsc::UnboundedReceiver<BtCmd>) {
         let (bt_tx, bt_rx) = mpsc::unbounded_channel();
         let (changed, _) = watch::channel(0);
         let uid = load_uid(&data_dir);
@@ -148,8 +161,116 @@ impl App {
             idle_since: AtomicU64::new(now()),
             config_dirty: AtomicBool::new(false),
             save_requested: tokio::sync::Notify::new(),
+            privilege,
+            problems: Mutex::new(Vec::new()),
+            check_now: tokio::sync::Notify::new(),
+            parked: Mutex::new(None),
+            park_seq: AtomicU64::new(0),
         });
         (app, bt_rx)
+    }
+
+    /// A stream ended: keep its outputs open, playing silence, so the next stream (the
+    /// next song, the phone resuming) starts without the click of a card powering up.
+    /// They close after `LINGER` if nothing takes them over.
+    pub fn park_outputs(self: &Arc<Self>, group: crate::group::OutputGroup) {
+        if group.is_empty() || !group.park() {
+            group.close(false);
+            return;
+        }
+        let id = self.park_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let old = self.parked.lock().unwrap().replace((id, group));
+        if let Some((_, old)) = old {
+            old.close(false);
+        }
+        let app = self.clone();
+        let _ = std::thread::Builder::new().name("park".into()).spawn(move || {
+            std::thread::sleep(crate::group::LINGER);
+            let expired = {
+                let mut p = app.parked.lock().unwrap();
+                if p.as_ref().map(|(i, _)| *i) == Some(id) {
+                    p.take()
+                } else {
+                    None
+                }
+            };
+            if let Some((_, g)) = expired {
+                g.close(false);
+            }
+        });
+    }
+
+    /// The parked outputs, if they suit a stream of this format.
+    pub fn take_parked(
+        &self,
+        rate: u32,
+        channels: u32,
+        gen: u64,
+        latency_ms: u32,
+    ) -> Option<crate::group::OutputGroup> {
+        let mut p = self.parked.lock().unwrap();
+        if p.as_ref().is_some_and(|(_, g)| g.compatible(rate, channels, gen, latency_ms) && g.alive()) {
+            p.take().map(|(_, g)| g)
+        } else {
+            None
+        }
+    }
+
+    /// Close the parked outputs (in the background), so another stream can open the cards.
+    pub fn evict_parked(&self) {
+        if let Some((_, g)) = self.parked.lock().unwrap().take() {
+            let _ = std::thread::Builder::new().name("unpark".into()).spawn(move || g.close(false));
+        }
+    }
+
+    pub fn outputs_parked(&self) -> bool {
+        self.parked.lock().unwrap().is_some()
+    }
+
+    /// Add or update a setup problem. Logged once, when it appears or changes.
+    pub fn set_problem(&self, p: Problem) {
+        {
+            let mut list = self.problems.lock().unwrap();
+            if let Some(old) = list.iter_mut().find(|o| o.id == p.id) {
+                if *old == p {
+                    return;
+                }
+                *old = p.clone();
+            } else {
+                list.push(p.clone());
+            }
+            list.sort_by_key(|p| p.level);
+        }
+        let fix = if p.fix.is_empty() { String::new() } else { format!(" Fix: {}", p.fix.join(" ; ")) };
+        match p.level {
+            Level::Info => log::info!("{}: {}{fix}", p.title, p.detail),
+            _ => log::warn!("{}: {}{fix}", p.title, p.detail),
+        }
+        self.notify();
+    }
+
+    /// The problem is gone.
+    pub fn clear_problem(&self, id: &str) {
+        self.retain_problems(|p| p.id != id);
+    }
+
+    pub fn retain_problems(&self, keep: impl Fn(&Problem) -> bool) {
+        let removed: Vec<Problem> = {
+            let mut list = self.problems.lock().unwrap();
+            let (kept, removed): (Vec<Problem>, Vec<Problem>) = list.drain(..).partition(|p| keep(p));
+            *list = kept;
+            removed
+        };
+        for p in &removed {
+            log::info!("solved: {}", p.title);
+        }
+        if !removed.is_empty() {
+            self.notify();
+        }
+    }
+
+    pub fn problems(&self) -> Vec<Problem> {
+        self.problems.lock().unwrap().clone()
     }
 
     pub fn cfg(&self) -> Config {
@@ -274,6 +395,7 @@ impl App {
         };
         if reopen {
             self.outputs_gen.fetch_add(1, Ordering::Relaxed);
+            self.evict_parked(); // kept open with the old settings
             self.update_status(|s| s.outputs.clear());
         } else {
             self.notify();
@@ -328,6 +450,7 @@ impl App {
                 "device": o.device, "name": o.name, "enabled": o.enabled, "volume": o.volume,
             })).collect::<Vec<_>>(),
             "status": status,
+            "problems": self.problems(),
             "stats": {
                 "packets": self.stats.packets.load(Ordering::Relaxed),
                 "decode_errors": self.stats.decode_errors.load(Ordering::Relaxed),
@@ -336,6 +459,9 @@ impl App {
         })
     }
 }
+
+/// The uid file exists but could not be read: the id changes on every start.
+pub static TEMPORARY_UID: AtomicBool = AtomicBool::new(false);
 
 /// Read or create a random UUID in the data directory.
 fn load_uid(data_dir: &std::path::Path) -> String {
@@ -349,6 +475,12 @@ fn load_uid(data_dir: &std::path::Path) -> String {
     let uid = std::fs::read_to_string("/proc/sys/kernel/random/uuid")
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| format!("00000000-0000-4000-8000-{:012x}", now()));
+    if path.exists() {
+        // There, but unreadable: keep it for the next start with the right owner.
+        log::warn!("cannot read {}; using a temporary device id", path.display());
+        TEMPORARY_UID.store(true, Ordering::Relaxed);
+        return uid;
+    }
     if let Err(e) = std::fs::write(&path, &uid) {
         log::warn!("cannot save {}: {e}; the device id changes on every start", path.display());
     }

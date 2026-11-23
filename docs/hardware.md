@@ -26,6 +26,19 @@ Please add your board in a pull request or an issue.
 - **HDMI ARC is not supported.** ARC carries sound from the TV to a soundbar; board HDMI
   ports cannot receive it.
 
+### Protecting the speakers
+
+Switching a sound card on and off pops on many boards, and a card that runs out of data
+clicks. The app avoids both:
+
+- Between songs, and while paused, outputs stay open playing silence for 10 seconds, so
+  the next song starts without a pop. Then they close and the amplifier can power down.
+- When the data stops for a moment (Wi-Fi, a phone between songs), the output plays
+  silence instead of running dry.
+- Sound fades in when it starts, and fades out (30 ms) when another source takes over or
+  playback stops.
+- **Max volume** in the settings caps every source, including phones and Home Assistant.
+
 ## Wi-Fi and Bluetooth on one chip
 
 Most boards have one combo chip for Wi-Fi and Bluetooth with one antenna. Heavy Bluetooth

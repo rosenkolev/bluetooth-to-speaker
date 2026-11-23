@@ -28,6 +28,7 @@ pub async fn run(app: Arc<App>) {
         .route("/api/volume", post(volume))
         .route("/api/media/{action}", post(media))
         .route("/api/devices/{addr}/{action}", post(device))
+        .route("/api/checks", post(run_checks))
         .layer(axum::middleware::from_fn(same_site_only))
         .with_state(app.clone());
     let router = if app.cfg().dlna.enabled { router.merge(crate::dlna::router(app.clone())) } else { router };
@@ -121,6 +122,12 @@ async fn put_config(State(app): State<Arc<App>>, Json(mut new): Json<Config>) ->
     app.save_config();
     app.notify();
     Json(serde_json::json!({ "ok": true, "restart_needed": restart_needed })).into_response()
+}
+
+/// "Check again": run the setup checks now.
+async fn run_checks(State(app): State<Arc<App>>) -> StatusCode {
+    app.check_now.notify_one();
+    StatusCode::NO_CONTENT
 }
 
 async fn pair(State(app): State<Arc<App>>) -> StatusCode {

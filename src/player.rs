@@ -161,8 +161,13 @@ pub fn run_bt_stream(app: Arc<App>, fd: OwnedFd, read_mtu: usize, lease: Lease) 
             o.write(&pcm, false, &lease.stop);
         }
     }
+    // Keep the outputs open for what comes next. Cut off: the writers fade out on their own;
+    // the phone stopped: play what is buffered first.
     if let Some(o) = out {
-        o.close(!preempted);
+        if !preempted {
+            o.drain_rings();
+        }
+        app.park_outputs(o);
     }
     app.output.release(&lease);
     app.playback_stopped();
@@ -326,12 +331,9 @@ fn play_url(app: &Arc<App>, uri: &str, net: &NetState, lease: &Lease) -> Result<
     let mut sbuf: Option<SampleBuffer<i16>> = None;
     let mut sbuf_spec = None;
     let mut frames_played: u64 = 0;
-    loop {
+    let result = loop {
         if lease.stopped() {
-            if let Some(o) = out {
-                o.close(false);
-            }
-            return Ok(());
+            break Ok(());
         }
         while net.paused.load(Ordering::Relaxed) && !lease.stopped() {
             std::thread::sleep(Duration::from_millis(100));
@@ -339,9 +341,9 @@ fn play_url(app: &Arc<App>, uri: &str, net: &NetState, lease: &Lease) -> Result<
         let packet = match format.next_packet() {
             Ok(p) => p,
             Err(symphonia::core::errors::Error::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                break;
+                break Ok(());
             }
-            Err(e) => return Err(e.to_string()),
+            Err(e) => break Err(e.to_string()),
         };
         if packet.track_id() != track.id {
             continue;
@@ -349,7 +351,7 @@ fn play_url(app: &Arc<App>, uri: &str, net: &NetState, lease: &Lease) -> Result<
         let decoded = match decoder.decode(&packet) {
             Ok(d) => d,
             Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
-            Err(e) => return Err(e.to_string()),
+            Err(e) => break Err(e.to_string()),
         };
         let spec = *decoded.spec();
         let ch = spec.channels.count() as u32;
@@ -385,9 +387,14 @@ fn play_url(app: &Arc<App>, uri: &str, net: &NetState, lease: &Lease) -> Result<
         }
         frames_played += (samples.len() / ch as usize) as u64;
         net.position_ms.store(frames_played * 1000 / spec.rate as u64, Ordering::Relaxed);
-    }
+    };
+    // Keep the outputs open for the next song. Stopped or replaced: the writers fade out on
+    // their own; the end of the song: play what is buffered first.
     if let Some(o) = out {
-        o.close(true);
+        if !lease.stopped() {
+            o.drain_rings();
+        }
+        app.park_outputs(o);
     }
-    Ok(())
+    result
 }

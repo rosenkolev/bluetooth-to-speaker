@@ -11,10 +11,15 @@ services:
     volumes:
       - /run/dbus:/run/dbus:ro # the host's Bluetooth service (BlueZ)
       - ./data:/data # settings and paired-phone memory
-    # Least privilege: no capabilities except real-time priority for the audio threads.
+    # Least privilege. The app starts as root only to give the data folder and the sound
+    # devices to user 1000 (CHOWN, SETUID, SETGID), then runs as that user with nothing but
+    # real-time priority for the audio threads (SYS_NICE).
     cap_drop:
       - ALL
     cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
       - SYS_NICE
     read_only: true
     security_opt:

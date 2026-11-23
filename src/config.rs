@@ -127,41 +127,70 @@ impl Default for DlnaConfig {
     }
 }
 
+/// Set when the settings file exists but could not be read: saving is off, so the
+/// defaults in use never replace it. Holds the error.
+pub static UNREADABLE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 impl Config {
     pub fn path(data_dir: &Path) -> PathBuf {
         data_dir.join("config.json")
     }
 
+    /// HTTP port before the settings are loaded (HTTP_PORT, else the settings file).
+    /// Reads only; any error gives the default.
+    pub fn peek_http_port(data_dir: &Path) -> u16 {
+        if let Some(p) = std::env::var("HTTP_PORT").ok().and_then(|v| v.parse().ok()) {
+            return p;
+        }
+        std::fs::read_to_string(Self::path(data_dir))
+            .ok()
+            .and_then(|s| serde_json::from_str::<Config>(&s).ok())
+            .map(|c| c.http_port)
+            .unwrap_or_else(|| Config::default().http_port)
+    }
+
     pub fn load(data_dir: &Path) -> Config {
         let path = Self::path(data_dir);
+        let first_start = !path.exists();
         let mut cfg: Config = match std::fs::read_to_string(&path) {
             Ok(s) => match serde_json::from_str(&s) {
                 Ok(c) => c,
                 Err(e) => {
                     // Keep the broken file for the user instead of overwriting it with defaults.
-                    let bad = data_dir.join("config.json.bad");
+                    // A new name each time: an older broken file is never overwritten.
+                    let bad = data_dir.join(format!("config.json.bad-{}", crate::app::now()));
                     log::error!("settings file is invalid ({e}); kept as {} and using defaults", bad.display());
                     let _ = std::fs::rename(&path, bad);
                     Config::default()
                 }
             },
-            Err(_) => Config::default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
+            Err(e) => {
+                // Exists but cannot be read (owned by another user): never overwrite it.
+                log::error!("cannot read {}: {e}; using defaults and not saving", path.display());
+                *UNREADABLE.lock().unwrap() = Some(e.to_string());
+                Config::default()
+            }
         };
-        // Environment overrides, handy for compose files.
-        if let Ok(v) = std::env::var("BT_NAME") {
-            cfg.name = v;
+        // Starting values from the environment, handy for compose files. Only on the first
+        // start: afterwards the web UI owns these, and a restart must not undo its changes.
+        if first_start {
+            if let Ok(v) = std::env::var("BT_NAME") {
+                cfg.name = v;
+            }
+            // ALSA devices separated by ';' (device names contain commas), all enabled.
+            if let Ok(v) = std::env::var("BT_OUTPUT") {
+                cfg.outputs = v
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|d| !d.is_empty())
+                    .map(|d| OutputCfg { device: d.into(), name: d.into(), ..Default::default() })
+                    .collect();
+            }
         }
+        // Deployment settings (not in the web UI): the environment always wins.
         if let Ok(v) = std::env::var("BT_ADAPTER") {
             cfg.adapter = v;
-        }
-        // ALSA devices separated by ';' (device names contain commas), all enabled.
-        if let Ok(v) = std::env::var("BT_OUTPUT") {
-            cfg.outputs = v
-                .split(';')
-                .map(str::trim)
-                .filter(|d| !d.is_empty())
-                .map(|d| OutputCfg { device: d.into(), name: d.into(), ..Default::default() })
-                .collect();
         }
         if let Ok(v) = std::env::var("HTTP_PORT") {
             if let Ok(p) = v.parse() {
@@ -229,6 +258,9 @@ impl Config {
     /// so a power cut leaves either the old or the new settings, never an empty file.
     pub fn save(&self, data_dir: &Path) {
         use std::io::Write;
+        if UNREADABLE.lock().unwrap().is_some() {
+            return; // the user's settings are there; defaults must not replace them
+        }
         let tmp = data_dir.join("config.json.tmp");
         let Ok(s) = serde_json::to_string_pretty(self) else { return };
         let res = (|| -> std::io::Result<()> {
@@ -246,7 +278,7 @@ impl Config {
             Ok(())
         })();
         if let Err(e) = res {
-            log::warn!("cannot save settings in {}: {e} (is the folder writable by root?)", data_dir.display());
+            log::warn!("cannot save settings in {}: {e}", data_dir.display());
         }
     }
 }
